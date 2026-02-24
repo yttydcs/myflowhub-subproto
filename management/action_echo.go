@@ -20,4 +20,3 @@ func registerEchoActions(h *ManagementHandler) core.SubProcessAction {
 		h.sendActionResp(ctx, conn, hdr, actionNodeEchoResp, nodeEchoResp{Code: 1, Msg: "ok", Echo: req.Message})
 	})
 }
-

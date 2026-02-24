@@ -55,4 +55,3 @@ func enumerateDirectNodes(cm core.IConnectionManager) []nodeInfo {
 	})
 	return nodes
 }
-

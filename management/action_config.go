@@ -78,4 +78,3 @@ func registerConfigListActions(h *ManagementHandler) core.SubProcessAction {
 		h.sendActionResp(ctx, conn, hdr, actionConfigListResp, configListResp{Code: 501, Msg: "config not listable"})
 	})
 }
-

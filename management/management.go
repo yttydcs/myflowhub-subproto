@@ -140,6 +140,8 @@ func buildForwardError(action string, data json.RawMessage, code int, msg string
 	switch action {
 	case actionNodeEcho:
 		return actionNodeEchoResp, nodeEchoResp{Code: code, Msg: msg}
+	case actionNodeInfo:
+		return actionNodeInfoResp, nodeInfoResp{Code: code, Msg: msg}
 	case actionListNodes:
 		return actionListNodesResp, listNodesResp{Code: code, Msg: msg}
 	case actionListSubtree:
@@ -185,4 +187,3 @@ func findParentConn(cm core.IConnectionManager) core.IConnection {
 	})
 	return parent
 }
-

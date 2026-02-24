@@ -6,6 +6,8 @@ func registerActions(h *ManagementHandler) []core.SubProcessAction {
 	return []core.SubProcessAction{
 		// echo
 		registerEchoActions(h),
+		// info
+		registerNodeInfoActions(h),
 		// config
 		registerConfigGetActions(h),
 		registerConfigSetActions(h),
@@ -15,4 +17,3 @@ func registerActions(h *ManagementHandler) []core.SubProcessAction {
 		registerListSubtreeActions(h),
 	}
 }
-
