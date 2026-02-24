@@ -10,6 +10,7 @@
   - `management/actions.go`：注册 `node_info`
   - `management/types.go`：补充 action 常量与请求/响应类型别名
   - `management/management.go`：补充 forward 失败时的 `node_info_resp` 错误响应映射
+  - `management/go.mod`、`management/go.sum`：依赖升级到 `github.com/yttydcs/myflowhub-proto v0.1.1`
 
 ## 对应 plan.md 任务映射
 - `worktrees/node-info/MyFlowHub-Win/plan.md`
@@ -28,4 +29,3 @@
 ## 潜在影响与回滚方案
 - 影响：仅新增 action，不改变既有 wire；旧节点仍可工作（但不支持 node_info 时 Win 侧可能超时，需要 UI 提示）。
 - 回滚：revert 本提交；若已发布 tag，建议走补丁版本而不是删除 tag。
-
