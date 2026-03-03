@@ -1,173 +1,95 @@
-# Plan - PR4：拆剩余子协议为独立 Go module（含 broker）
+# Plan - SubProto：Management Nodes 仅返回 Children（children-only）
 
 ## Workflow 信息
 - Repo：`MyFlowHub-SubProto`
-- 分支：`refactor/subproto-modules-all`
-- Worktree：`d:\project\MyFlowHub3\worktrees\pr4-subproto-modules\MyFlowHub-SubProto`
+- 分支：`fix/management-children-only`
+- Worktree：`d:\project\MyFlowHub3\worktrees\fix-subproto-management-children-only`
 - Base：`origin/main`
-- 关联仓库（同一 workflow）：`MyFlowHub-Server`（同名分支/独占 worktree）
-- 参考：
-  - `d:\project\MyFlowHub3\target.md`
-  - `d:\project\MyFlowHub3\repos.md`
-  - `d:\project\MyFlowHub3\guide.md`（commit 信息中文）
+- 参考：`d:\project\MyFlowHub3\guide.md`（commit 信息中文）
 
-## 约束（边界）
-- wire 不改：SubProto 值 / Action 字符串 / JSON payload struct / HeaderTcp 语义均保持不变。
-- A2（单仓多 module）：
-  - 每个子协议一个目录 + 独立 `go.mod`；
-  - 版本 tag 形如：`<moduleDir>/vX.Y.Z`（例如 `auth/v0.1.0`）。
-- 依赖方向必须清晰：
-  - 本仓库的子协议 module 只依赖 `myflowhub-core` + `myflowhub-proto`（以及标准库）；
-  - 禁止依赖 `myflowhub-server` / `myflowhub-win`。
-- 版本策略（已确认）：
-  - 本轮新 module 首发统一 `v0.1.0`。
-- 验收测试必须使用 `GOWORK=off`（避免本地 `go.work` 干扰审计）。
-
-## 当前状态（事实，可审计）
-- 本仓库已有 module：
-  - `management`（tag：`management/v0.1.0`）
-  - `topicbus`（tag：`topicbus/v0.1.0`）
-- `MyFlowHub-Server` 仍包含以下子协议实现目录：
-  - `subproto/auth`、`subproto/varstore`、`subproto/file`、`subproto/forward`、`subproto/exec`、`subproto/flow`
-- `exec/flow` 当前通过 `myflowhub-server/internal/broker` 做“同进程 reqID -> resp 投递”，导致它们无法直接拆成独立 module（会反向依赖 Server）。
+## 背景 / 问题陈述（事实，可审计）
+- Management `list_nodes` 当前按“直连连接”枚举节点：遍历 `ConnManager.Range()`，读连接 meta 的 `nodeID` 直接回包。
+- 对于非 root hub（存在上游 parent link），该枚举会把 **parent 连接**也包含进来，导致设备树展开出现回指/环，例如：`node5 -> node1`。
+- Win/Android 的 Devices/Nodes UI 目前将 `list_nodes` 返回结果视为 children，因此会出现 `Duplicate` 与不可展开节点，影响可用性与一致性。
 
 ## 目标
-1) 新增共享 module：`github.com/yttydcs/myflowhub-subproto/broker`（tag：`broker/v0.1.0`）
-   - 用于承载 `Broker[T]` 与 `SharedExecCallBroker()`，解耦 `exec/flow` 对 Server 的依赖。
-2) 将剩余子协议一次性拆为独立 module（首发均 `v0.1.0`）：
-   - `auth`、`varstore`、`file`、`forward`、`exec`、`flow`
-3) 保持 Server 侧行为不变：Server 仅做装配，子协议实现由本仓库 module 提供（Server 侧计划见其 worktree 的 `plan.md`）。
-4) 文档策略（已确认）：
-   - SubProto 仓 `docs/change/*` 输出“完整设计 + 变更清单 + 版本/tag 列表”；
-   - Server 仓 `docs/change/*` 只做“依赖切换 + 删除目录”的短引用，并链接 SubProto 文档；
-   - 控制面文档（`d:\project\MyFlowHub3\repos.md`）同步口径。
+1) 将 Management `list_nodes` / `list_subtree` 调整为 **children-only**：只返回下游 children，不返回上游 parent。
+2) 保持 wire 不变（SubProto/Action/JSON schema 不变），仅调整语义与实现筛选逻辑。
+3) 增加最小单测覆盖，防止回归。
 
 ## 非目标
-- 不做协议语义调整/兼容开关；
-- 不做 “minimal/full 变体产品化”（仍保持 Deferred）；
-- 不做 “协议生成（single source-of-truth 生成 types/constants）”。
+- 不新增 “查看上游(parent)” 的管理动作；如未来需要，另起 workflow 设计 `list_upstream`/`list_links` 等动作。
+- 不改动节点 ID 分配、Auth 登录/注册语义与路由策略。
+
+## 约束（边界）
+- wire 不改：SubProto=1、Action 字符串、payload JSON 字段与 tag 不改。
+- 仅调整 Management 子协议实现（`myflowhub-subproto/management`）。
+- 测试必须以 `GOWORK=off` 运行（避免本地 `go.work` 影响审计与可复现性）。
+
+## 验收标准
+- 在典型拓扑 `1 -> 5 -> 6` 下：
+  - 对 `node1` 执行 `list_nodes`：仍可看到 `node5`（不受影响）。
+  - 对 `node5` 执行 `list_nodes`：只返回 `node6`，不再返回 `node1`。
+- 单测通过：
+  - `cd management; $env:GOWORK='off'; go test ./... -count=1 -p 1`
+- 手工冒烟（建议）：
+  - Win/Android 端展开 `node5` 不再出现 `node1(Duplicate)`。
 
 ---
 
 ## 3.1) 计划拆分（Checklist）
 
-### SUBALL0 - 归档旧 plan
-- 目标：保留上一轮 topicbus 拆分 plan，避免覆盖。
-- 已执行（可审计）：`git mv plan.md docs/plan_archive/plan_archive_2026-02-20_subproto-topicbus-module.md`
+### MGCO0 - 归档旧 plan.md
+- 目标：避免旧 workflow plan 覆盖本次任务。
+- 已执行：`plan.md` → `docs/plan_archive/plan_archive_2026-03-03_subproto-management-children-only-prev.md`
 - 验收条件：归档文件存在且可阅读。
-- 回滚点：撤销该 `git mv`。
+- 回滚点：撤销该移动提交。
 
-### SUBALL1 - 新增 `broker` module（共享投递器）
-- 目标：
-  - 新增 module：`github.com/yttydcs/myflowhub-subproto/broker`
-  - 迁移 `myflowhub-server/internal/broker/*` 逻辑到此 module（wire 无关）。
-- 涉及文件（预期）：
-  - `broker/go.mod`
-  - `broker/broker.go`（`Broker[T]`、`Register/Deliver`）
-  - `broker/exec_call.go`（`SharedExecCallBroker()`：类型使用 `myflowhub-proto/protocol/exec.CallResp`）
-  - `broker/broker_test.go`
+### MGCO1 - 调整 `list_nodes` / `list_subtree` 为 children-only
+- 目标：Management nodes 枚举只返回 children，不返回 parent。
+- 涉及模块/文件：
+  - `management/action_nodes.go`
+- 方案（实现级）：
+  - 在 `enumerateDirectNodes` 中读取连接 meta `role`（`core.MetaRoleKey`）：
+    - `role == core.RoleParent` → 跳过（上游 parent link）
+    - 其它（含缺省/child）→ 允许进入枚举（仍需 `nodeID != 0`）
+  - `list_subtree` 继续复用同一枚举函数（因此同样 children-only），并保持“附带 self 节点”的现有行为（不递归）。
 - 验收条件：
-  - `cd broker; $env:GOWORK='off'; go test ./... -count=1 -p 1` 通过
-- 测试点：
-  - 重复注册同 reqID 关闭旧通道（防泄漏）
-  - Deliver 后通道关闭（等待者可退出）
-- 回滚点：revert 提交。
+  - 对存在 parent link 的 hub 节点执行 `list_nodes`，返回不包含 parent 的 `node_id`。
+- 回滚点：revert 对 `action_nodes.go` 的提交。
 
-### SUBALL2 - 新增 `auth` module（从 Server 迁入）
-- 目标：创建 `auth` 独立 module，并迁入 Server 的 `subproto/auth` 实现（行为不变）。
-- 依赖要求：只依赖 `myflowhub-core` + `myflowhub-proto`（以及标准库）。
-- 涉及文件（预期）：
-  - `auth/go.mod` / `auth/go.sum`
-  - `auth/*.go`（从 `MyFlowHub-Server/subproto/auth/*.go` 迁入）
+### MGCO2 - 增加单元测试覆盖（防回归）
+- 目标：覆盖 “parent 连接不应出现在 nodes 列表” 的关键行为。
+- 涉及模块/文件：
+  - `management/action_nodes_test.go`（新增）
+- 测试用例（最小）：
+  - ConnManager 中包含：
+    - parent conn：`role=parent`、`nodeID=1`
+    - child conn：`role=child`、`nodeID=6`
+  - 断言：`enumerateDirectNodes` 只返回 `nodeID=6`。
+- 验收条件：`go test` 通过且覆盖用例稳定。
+- 回滚点：revert 测试提交。
+
+### MGCO3 - 回归与冒烟验证
+- 目标：确保不影响 root hub 的 nodes 枚举，并消除 UI duplicate。
 - 验收条件：
-  - `cd auth; GOWORK=off go test ./... -count=1 -p 1` 通过
-- 回滚点：revert 提交。
+  - `MGCO1/MGCO2` 的自动化验收通过；
+  - 手动在 Win/Android UI 验证 `node5` 展开不再出现 `node1`。
+- 回滚点：按提交逐个 revert。
 
-### SUBALL3 - 新增 `varstore` module（从 Server 迁入）
-- 目标：创建 `varstore` 独立 module，并迁入 Server 的 `subproto/varstore` 实现（行为不变）。
-- 涉及文件（预期）：
-  - `varstore/go.mod` / `varstore/go.sum`
-  - `varstore/*.go`（从 `MyFlowHub-Server/subproto/varstore/*.go` 迁入）
-- 验收条件：`cd varstore; GOWORK=off go test ./... -count=1 -p 1` 通过
-- 回滚点：revert 提交。
+### MGCO4 - Code Review（阶段 3.3）
+- 目标：对照需求逐项审查：语义、兼容性、性能、测试。
+- 产出：Review 结论（通过/不通过）与必要修正。
 
-### SUBALL4 - 新增 `file` module（从 Server 迁入）
-- 目标：创建 `file` 独立 module，并迁入 Server 的 `subproto/file` 实现（行为不变）。
-- 涉及文件（预期）：
-  - `file/go.mod` / `file/go.sum`
-  - `file/*.go`（从 `MyFlowHub-Server/subproto/file/*.go` 迁入）
-- 验收条件：`cd file; GOWORK=off go test ./... -count=1 -p 1` 通过
-- 回滚点：revert 提交。
+### MGCO5 - 归档变更（阶段 4）
+- 目标：补齐可审计变更说明与回滚路径。
+- 涉及文件：
+  - `docs/change/2026-03-03_management-nodes-children-only.md`（新增）
+- 必含内容：
+  - 变更背景/目标、具体变更、任务映射、关键决策与权衡、测试方式/结果、潜在影响与回滚方案。
 
-### SUBALL5 - 新增 `forward` module（默认转发 handler）
-- 目标：创建 `forward` 独立 module，并迁入 Server 的 `subproto/forward` 实现（行为不变）。
-- 涉及文件（预期）：
-  - `forward/go.mod` / `forward/go.sum`
-  - `forward/*.go`（从 `MyFlowHub-Server/subproto/forward/*.go` 迁入）
-- 验收条件：`cd forward; GOWORK=off go test ./... -count=1 -p 1` 通过
-- 回滚点：revert 提交。
-
-### SUBALL6 - 新增 `exec` module（改用 `subproto/broker`）
-- 目标：
-  - 创建 `exec` 独立 module，并迁入 Server 的 `subproto/exec` 实现（行为不变）。
-  - 将 `myflowhub-server/internal/broker` 引用替换为 `github.com/yttydcs/myflowhub-subproto/broker`。
-- 涉及文件（预期）：
-  - `exec/go.mod` / `exec/go.sum`
-  - `exec/*.go`（从 `MyFlowHub-Server/subproto/exec/*.go` 迁入，并改 import）
-- 验收条件：`cd exec; GOWORK=off go test ./... -count=1 -p 1` 通过
-- 回滚点：revert 提交。
-
-### SUBALL7 - 新增 `flow` module（改用 `subproto/broker` + 直依赖 Proto exec）
-- 目标：
-  - 创建 `flow` 独立 module，并迁入 Server 的 `subproto/flow` 实现（行为不变）。
-  - 将 `myflowhub-server/internal/broker` 引用替换为 `github.com/yttydcs/myflowhub-subproto/broker`。
-  - 将 `myflowhub-server/protocol/exec` 引用替换为 `myflowhub-proto/protocol/exec`（避免依赖 Server）。
-- 涉及文件（预期）：
-  - `flow/go.mod` / `flow/go.sum`
-  - `flow/*.go`（从 `MyFlowHub-Server/subproto/flow/*.go` 迁入，并改 import）
-- 验收条件：`cd flow; GOWORK=off go test ./... -count=1 -p 1` 通过
-- 回滚点：revert 提交。
-
-### SUBALL8 - 统一验收（逐 module）
-- 目标：确保每个 module 在 `GOWORK=off` 下独立可测。
-- 验收命令（示例，逐个目录执行）：
-```powershell
-$env:GOTMPDIR='d:\\project\\MyFlowHub3\\.tmp\\gotmp'
-New-Item -ItemType Directory -Force -Path $env:GOTMPDIR | Out-Null
-$env:GOWORK='off'
-go test ./... -count=1 -p 1
-```
-- 验收条件：`broker/auth/varstore/file/forward/exec/flow` 均通过。
-
-### SUBALL9 - 发布 tags 并 push（供 Server 拉取）
-- 目标：让 Server 侧 `GOWORK=off` 可拉取到对应 module 版本。
-- 操作（同一 commit 上打多个 tag，均为 annotated）：
-  - `broker/v0.1.0`
-  - `auth/v0.1.0`
-  - `varstore/v0.1.0`
-  - `file/v0.1.0`
-  - `forward/v0.1.0`
-  - `exec/v0.1.0`
-  - `flow/v0.1.0`
-- 验收条件：
-  - tags 已 push；
-  - Server 侧 `go mod tidy` 能拉取上述版本（见 Server plan）。
-- 回滚点：revert + 删除 tag（如需）。
-
-### SUBALL10 - Code Review（阶段 3.3）
-- 按 3.3 清单逐项审查并输出结论（通过/不通过）；不通过则回到对应任务修正。
-
-### SUBALL11 - 归档变更（阶段 4：SubProto 完整文档）
-- 新增文档（完整版）：`docs/change/2026-02-20_subproto-split-remaining-modules.md`
-- 必须包含：
-  - 变更背景/目标
-  - 新增 module 清单（path + tag + 依赖）
-  - broker 设计与 `exec/flow` 解耦说明
-  - 验收命令与结果
-  - 对 Server 的要求（需切换依赖并删除旧目录）
-  - 回滚方案
-
-### SUBALL12 - 控制面文档同步（非代码仓，控制面文件）
-- 目标：更新 `d:\project\MyFlowHub3\repos.md` 的“Server 当前结构（事实）”与 “MyFlowHub-SubProto 定位/现状”，避免误导。
-- 验收条件：文档无矛盾（Server 不再宣称包含已迁走的 `subproto/*` 实现）。
+### MGCO6 -（可选）发布版本 tag
+- 说明：若需要让上游以 semver 拉取（非本地 go.work/replace），建议发布：
+  - tag：`management/v0.1.1`
+- 前置：需要你明确“是否要发布 tag”后再执行（避免误发布）。
 
