@@ -39,15 +39,15 @@ func enumerateDirectNodes(cm core.IConnectionManager) []nodeInfo {
 	seen := make(map[uint32]bool)
 	nodes := make([]nodeInfo, 0)
 	cm.Range(func(c core.IConnection) bool {
+		// Children-only: 上游 parent link 不属于 children，避免树形回指/环（例如 5 -> 1）。
+		if role, ok := c.GetMeta(core.MetaRoleKey); ok {
+			if s, ok2 := role.(string); ok2 && s == core.RoleParent {
+				return true
+			}
+		}
 		if nidVal, ok := c.GetMeta("nodeID"); ok {
 			if nid, ok2 := nidVal.(uint32); ok2 && nid != 0 && !seen[nid] {
-				hasChildren := false
-				if role, ok := c.GetMeta(core.MetaRoleKey); ok {
-					if s, ok2 := role.(string); ok2 && s == core.RoleParent {
-						hasChildren = true
-					}
-				}
-				nodes = append(nodes, nodeInfo{NodeID: nid, HasChildren: hasChildren})
+				nodes = append(nodes, nodeInfo{NodeID: nid, HasChildren: false})
 				seen[nid] = true
 			}
 		}
