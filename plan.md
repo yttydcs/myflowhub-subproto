@@ -1,95 +1,122 @@
-# Plan - SubProto：Management Nodes 仅返回 Children（children-only）
+# Plan - SubProto(file)：Hub（node1）File Console root list 报 not found 修复（BaseDir exeDir 解析 + 自动创建）
 
 ## Workflow 信息
 - Repo：`MyFlowHub-SubProto`
-- 分支：`fix/management-children-only`
-- Worktree：`d:\project\MyFlowHub3\worktrees\fix-subproto-management-children-only`
-- Base：`origin/main`
-- 参考：`d:\project\MyFlowHub3\guide.md`（commit 信息中文）
+- 分支：`fix/hub-file-console-base-dir`
+- Worktree：`d:\project\MyFlowHub3\worktrees\fix-hub-file-console-base-dir\MyFlowHub-SubProto`
+- Base：`main`
+- 关联仓库（同一 workflow）：`MyFlowHub-Server`（同名分支/独占 worktree）
+- 参考：
+  - `d:\project\MyFlowHub3\repos.md`
+  - `d:\project\MyFlowHub3\guide.md`（commit 信息中文）
 
 ## 背景 / 问题陈述（事实，可审计）
-- Management `list_nodes` 当前按“直连连接”枚举节点：遍历 `ConnManager.Range()`，读连接 meta 的 `nodeID` 直接回包。
-- 对于非 root hub（存在上游 parent link），该枚举会把 **parent 连接**也包含进来，导致设备树展开出现回指/环，例如：`node5 -> node1`。
-- Win/Android 的 Devices/Nodes UI 目前将 `list_nodes` 返回结果视为 children，因此会出现 `Duplicate` 与不可展开节点，影响可用性与一致性。
+- Win 的 File Console 访问 Hub（node1）时提示：`not found`。
+- Hub 侧使用 `myflowhub-subproto/file` 处理 list：
+  - 默认配置 `file.base_dir=./file`；
+  - `handleListLocal` 对 `BaseDir + dir` 执行 `os.ReadDir`；
+  - 当 `./file` 目录不存在时，`os.ReadDir` 失败被统一映射为 `404 not found`。
+- 额外风险：`file.base_dir` 为相对路径时以 CWD 为基准，`hub_server` 从不同目录启动可能导致 `file/` 目录散落到不同位置（与你“目录最好在软件同一目录下”的诉求冲突）。
 
 ## 目标
-1) 将 Management `list_nodes` / `list_subtree` 调整为 **children-only**：只返回下游 children，不返回上游 parent。
-2) 保持 wire 不变（SubProto/Action/JSON schema 不变），仅调整语义与实现筛选逻辑。
-3) 增加最小单测覆盖，防止回归。
+1) Hub（node1）root list（`dir==""`）在 `BaseDir` 不存在时：自动创建目录并返回空列表（成功）。
+2) `file.base_dir` 为相对路径时：以 **可执行文件目录（exeDir）** 为基准解析，默认落点稳定为 `exeDir/file`。
+3) 发布 `github.com/yttydcs/myflowhub-subproto/file v0.1.1`（tag：`file/v0.1.1`），供 Server 升级依赖。
 
 ## 非目标
-- 不新增 “查看上游(parent)” 的管理动作；如未来需要，另起 workflow 设计 `list_upstream`/`list_links` 等动作。
-- 不改动节点 ID 分配、Auth 登录/注册语义与路由策略。
+- 不改 wire：SubProto 值 / Action 字符串 / JSON schema 不变。
+- 不改变非 root 子目录的语义：`dir!="“` 且目录不存在时，仍返回 `not found`（不隐式创建任意子目录）。
+- 不引入“浏览整机文件系统”；仍以 `BaseDir` 为沙箱根目录。
 
 ## 约束（边界）
-- wire 不改：SubProto=1、Action 字符串、payload JSON 字段与 tag 不改。
-- 仅调整 Management 子协议实现（`myflowhub-subproto/management`）。
-- 测试必须以 `GOWORK=off` 运行（避免本地 `go.work` 影响审计与可复现性）。
+- 仅修改 `myflowhub-subproto/file` module。
+- 测试与验收命令统一使用 `GOWORK=off`（避免本地 `go.work` 干扰可审计性）。
 
 ## 验收标准
-- 在典型拓扑 `1 -> 5 -> 6` 下：
-  - 对 `node1` 执行 `list_nodes`：仍可看到 `node5`（不受影响）。
-  - 对 `node5` 执行 `list_nodes`：只返回 `node6`，不再返回 `node1`。
+- Windows 下直接运行 `hub_server`（未配置 `file.base_dir`）：
+  - 首次打开 Hub（node1）File Console 根目录：不再 `not found`，返回空列表；
+  - 自动在 `hub_server.exe` 同目录创建 `file/`。
 - 单测通过：
-  - `cd management; $env:GOWORK='off'; go test ./... -count=1 -p 1`
-- 手工冒烟（建议）：
-  - Win/Android 端展开 `node5` 不再出现 `node1(Duplicate)`。
+  - `cd file; $env:GOWORK='off'; go test ./... -count=1 -p 1`
+- 发布可用：
+  - tag `file/v0.1.1` 已 push；
+  - `go list -m github.com/yttydcs/myflowhub-subproto/file@v0.1.1` 可解析。
 
 ---
 
 ## 3.1) 计划拆分（Checklist）
 
-### MGCO0 - 归档旧 plan.md
-- 目标：避免旧 workflow plan 覆盖本次任务。
-- 已执行：`plan.md` → `docs/plan_archive/plan_archive_2026-03-03_subproto-management-children-only-prev.md`
+### FILE0 - 归档旧 plan（已执行）
+- 目标：避免历史 plan 覆盖本 workflow。
+- 已执行：`git mv plan.md docs/plan_archive/plan_archive_2026-03-04_subproto-management-children-only.md`
 - 验收条件：归档文件存在且可阅读。
-- 回滚点：撤销该移动提交。
+- 回滚点：撤销该 `git mv`。
 
-### MGCO1 - 调整 `list_nodes` / `list_subtree` 为 children-only
-- 目标：Management nodes 枚举只返回 children，不返回 parent。
-- 涉及模块/文件：
-  - `management/action_nodes.go`
-- 方案（实现级）：
-  - 在 `enumerateDirectNodes` 中读取连接 meta `role`（`core.MetaRoleKey`）：
-    - `role == core.RoleParent` → 跳过（上游 parent link）
-    - 其它（含缺省/child）→ 允许进入枚举（仍需 `nodeID != 0`）
-  - `list_subtree` 继续复用同一枚举函数（因此同样 children-only），并保持“附带 self 节点”的现有行为（不递归）。
-- 验收条件：
-  - 对存在 parent link 的 hub 节点执行 `list_nodes`，返回不包含 parent 的 `node_id`。
-- 回滚点：revert 对 `action_nodes.go` 的提交。
+### FILE1 - 配置：BaseDir 相对路径以 exeDir 为基准解析
+**目标**
+- `file.base_dir` 为相对路径（例如 `./file`）时，运行期解析为 `exeDir/<base_dir>`，避免随 CWD 漂移。
 
-### MGCO2 - 增加单元测试覆盖（防回归）
-- 目标：覆盖 “parent 连接不应出现在 nodes 列表” 的关键行为。
-- 涉及模块/文件：
-  - `management/action_nodes_test.go`（新增）
-- 测试用例（最小）：
-  - ConnManager 中包含：
-    - parent conn：`role=parent`、`nodeID=1`
-    - child conn：`role=child`、`nodeID=6`
-  - 断言：`enumerateDirectNodes` 只返回 `nodeID=6`。
-- 验收条件：`go test` 通过且覆盖用例稳定。
-- 回滚点：revert 测试提交。
+**涉及模块 / 文件**
+- `file/config.go`（新增解析函数/缓存）
 
-### MGCO3 - 回归与冒烟验证
-- 目标：确保不影响 root hub 的 nodes 枚举，并消除 UI duplicate。
-- 验收条件：
-  - `MGCO1/MGCO2` 的自动化验收通过；
-  - 手动在 Win/Android UI 验证 `node5` 展开不再出现 `node1`。
-- 回滚点：按提交逐个 revert。
+**验收条件**
+- 同一进程内切换 CWD，不影响 `BaseDir` 的最终解析结果。
 
-### MGCO4 - Code Review（阶段 3.3）
-- 目标：对照需求逐项审查：语义、兼容性、性能、测试。
-- 产出：Review 结论（通过/不通过）与必要修正。
+**测试点**
+- 单测覆盖：相对路径解析到 `os.Executable()` 目录；绝对路径保持不变。
 
-### MGCO5 - 归档变更（阶段 4）
-- 目标：补齐可审计变更说明与回滚路径。
-- 涉及文件：
-  - `docs/change/2026-03-03_management-nodes-children-only.md`（新增）
-- 必含内容：
-  - 变更背景/目标、具体变更、任务映射、关键决策与权衡、测试方式/结果、潜在影响与回滚方案。
+**回滚点**
+- revert 本任务提交。
 
-### MGCO6 -（可选）发布版本 tag
-- 说明：若需要让上游以 semver 拉取（非本地 go.work/replace），建议发布：
-  - tag：`management/v0.1.1`
-- 前置：需要你明确“是否要发布 tag”后再执行（避免误发布）。
+### FILE2 - 行为：root list 自动创建 BaseDir
+**目标**
+- `dir==""`（root list）时，若 `BaseDir` 不存在则 `MkdirAll(BaseDir)`，并返回空列表（成功）。
+
+**涉及模块 / 文件**
+- `file/handler.go`（`handleListLocal`）
+- （如需提高可测性）抽取最小的本地 list helper（同 module 内新文件）
+
+**验收条件**
+- root list 不再把 “BaseDir 不存在” 映射为 `404 not found`。
+
+**测试点**
+- 单测覆盖：BaseDir 不存在时可被创建；返回 code 为 ok 且 dirs/files 为空。
+
+**回滚点**
+- revert 本任务提交。
+
+### FILE3 - 测试：补充关键路径单测
+**目标**
+- 覆盖 BaseDir 解析与 root list 自动创建的关键路径，防回归。
+
+**涉及模块 / 文件**
+- `file/*_test.go`（新增）
+
+**验收条件**
+- `cd file; $env:GOWORK='off'; go test ./... -count=1 -p 1` 通过。
+
+**回滚点**
+- revert 测试提交（不影响功能）。
+
+### FILE4 - 发布：tag `file/v0.1.1`
+**目标**
+- 发布可被 Server 拉取的版本。
+
+**步骤**
+1) 合入上述改动并 push 分支
+2) 打 tag：`file/v0.1.1`
+3) push tag：`git push origin file/v0.1.1`
+
+**验收条件**
+- tag 在本地与远端均存在；`go list -m ...@v0.1.1` 可解析。
+
+**回滚点**
+- 已发布 tag 不建议删除；如需回滚，发布 `file/v0.1.2` 修正或在 Server 回退依赖版本。
+
+### FILE5 - Code Review（强制）+ 归档变更（强制）
+**目标**
+- 完成审查清单并输出 `docs/change/YYYY-MM-DD_*.md`。
+
+**验收条件**
+- Review 通过；变更文档包含任务映射、关键权衡（尤其 BaseDir 解析策略）、验证结果与回滚方案。
 
