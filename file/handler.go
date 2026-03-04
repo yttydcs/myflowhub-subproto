@@ -477,8 +477,24 @@ func (h *Handler) handleListLocal(ctx context.Context, hdr core.IHeader, req rea
 		return
 	}
 	root := filepath.Join(cfg.BaseDir, filepath.FromSlash(dir))
+	if dir == "" {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			if h.log != nil {
+				h.log.Warn("file list: mkdir base_dir failed", "err", err)
+			}
+			h.sendReadResp(ctx, hdr, requester, readResp{Code: 500, Msg: "mkdir failed", Op: opList, Dir: dir, Files: []string{}, Dirs: []string{}})
+			return
+		}
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
+		if dir == "" {
+			if h.log != nil {
+				h.log.Warn("file list: readdir base_dir failed", "err", err)
+			}
+			h.sendReadResp(ctx, hdr, requester, readResp{Code: 500, Msg: "read failed", Op: opList, Dir: dir, Files: []string{}, Dirs: []string{}})
+			return
+		}
 		h.sendReadResp(ctx, hdr, requester, readResp{Code: 404, Msg: "not found", Op: opList, Dir: dir, Files: []string{}, Dirs: []string{}})
 		return
 	}

@@ -1,8 +1,11 @@
 package file
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	core "github.com/yttydcs/myflowhub-core"
 )
@@ -25,12 +28,49 @@ type handlerConfig struct {
 
 func loadConfig(cfg core.IConfig) handlerConfig {
 	return handlerConfig{
-		BaseDir:          readString(cfg, cfgBaseDir, "./file"),
+		BaseDir:          resolveRuntimeBaseDir(readString(cfg, cfgBaseDir, "./file")),
 		MaxSizeBytes:     readUint64(cfg, cfgMaxSizeBytes, 0),
 		MaxConcurrent:    readInt(cfg, cfgMaxConcurrent, 4),
 		ChunkBytes:       readInt(cfg, cfgChunkBytes, 256*1024),
 		IncompleteTTLSec: readInt64(cfg, cfgIncompleteTTLSec, 3600),
 	}
+}
+
+var (
+	exeDirOnce   sync.Once
+	exeDirCached string
+)
+
+func executableDir() string {
+	exeDirOnce.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			return
+		}
+		exe = strings.TrimSpace(exe)
+		if exe == "" || !filepath.IsAbs(exe) {
+			return
+		}
+		exeDirCached = filepath.Dir(exe)
+	})
+	return exeDirCached
+}
+
+// resolveRuntimeBaseDir resolves relative baseDir against the executable directory (exeDir).
+// This avoids depending on the process CWD, making the default "./file" stable for hub_server.
+func resolveRuntimeBaseDir(baseDir string) string {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		baseDir = "."
+	}
+	baseDir = filepath.Clean(baseDir)
+	if filepath.IsAbs(baseDir) {
+		return baseDir
+	}
+	if exeDir := executableDir(); strings.TrimSpace(exeDir) != "" {
+		return filepath.Join(exeDir, baseDir)
+	}
+	return baseDir
 }
 
 func readString(cfg core.IConfig, key, def string) string {
