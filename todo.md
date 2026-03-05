@@ -1,63 +1,54 @@
-# TODO - SubProto：修复跨级 VarStore 目标节点路由丢失（2 -> 10 set 返回 code=4）
+# TODO - SubProto：VarStore 跨层（1->9->10）set/get 路由修复
 
 ## Workflow 信息
 - Repo：`MyFlowHub-SubProto`
-- 分支：`fix/subproto-uplogin-sender-pub`
-- Worktree：`d:\project\MyFlowHub3\repo\MyFlowHub-SubProto\worktrees\fix-subproto-uplogin-sender-pub\MyFlowHub-SubProto`
-- 触发问题：拓扑 `1 -> (2,9) -> 10`，由 2(Win) 对 owner=10 执行 VarStore set 报 `code=4 not found`。
+- 分支：`fix/varstore-crosshop-routing`
+- Worktree：`d:\project\MyFlowHub3\worktrees\fix-subproto-varstore-crosshop-routing`
+- 触发问题：拓扑 `1 -> (2,9) -> 10`，Win(2) 对 owner=10 执行 var set 返回 `not found (code=4)`；同层（1直连10）可用。
 
 ## 项目目标与当前状态
 - 目标：
-  - 修复 node10 向上登录传播（up_login）链路中 sender 公钥携带错误，避免父节点无法校验 sender 签名进而丢失路由索引。
-  - 让 `2 -> 1 -> 9 -> 10` 的 VarStore set 能正确命中 owner=10 路由。
+  - 修复 VarStore 在多跳拓扑下的目标转发能力，确保跨层 owner 可达。
+  - 保持同层行为与现有 wire 协议兼容。
 - 当前状态（已定位）：
-  - `auth/sendUpLogin` 当前把 `SenderPub` 错误设置为“登录设备(10)公钥”，而不是“sender 节点(9)公钥”；
-  - 当父节点缺少 sender 已信任公钥时，会依赖 `SenderPub` 回填校验，导致校验失败并不建立 `node10` 路由。
+  - `varstore` 当前未像 management 一样处理 `hdr.TargetID != local` 的命令转发；
+  - 跨层 notify/command 在中间节点可能被本地消费，导致链路中断与值不一致。
 
 ## 可执行任务清单（Checklist）
 
-- [x] UPLOGIN-1：修复 sendUpLogin 的 SenderPub 取值
-  - 目标：`SenderPub` 必须携带 sender 节点公钥（`h.nodePubB64`），而非被登录设备公钥。
+- [x] VSROUTE-1：补齐 VarStore 的按 target 转发入口
+  - 目标：当 `MajorCmd` 且 `TargetID != local` 时，按路由索引转发到下一跳（或父节点），本地不消费。
   - 涉及文件：
-    - `auth/actions_up_login.go`
+    - `varstore/varstore.go`
   - 验收条件：
-    - 构造的 `up_login` 数据中，`PubKey` 仍是登录节点公钥；`SenderPub` 为 sender 节点公钥。
+    - 多跳场景下，中间节点不再错误本地处理目标非本机的 varstore 命令。
   - 测试点：
-    - 单测断言 `SenderPub != PubKey`（在不同公钥输入下）。
+    - 新增单测覆盖 target-forward 成功/未命中分支。
   - 回滚点：
-    - 回滚 `actions_up_login.go` 本任务变更。
+    - 回滚 `varstore/varstore.go` 中新增的 forward 入口。
 
-- [x] UPLOGIN-2：补充单测覆盖关键构包逻辑
-  - 目标：防止未来回归把 `SenderPub` 再次误绑到目标节点公钥。
+- [x] VSROUTE-2：补充回归测试覆盖 1->9->10 关键路径
+  - 目标：锁定跨层 set/get/revoke 至少一条关键路径不回归。
   - 涉及文件：
-    - `auth/actions_up_login_test.go`（新增）
+    - `varstore/*_test.go`（新增或修改）
   - 验收条件：
-    - `go test ./auth -count=1 -p 1` 通过；
-    - 用例覆盖 `SenderPub` 与 `PubKey` 字段语义。
+    - `go test ./... -count=1 -p 1` 通过。
   - 回滚点：
-    - 删除新增测试文件。
+    - 删除新增测试并回滚相关断言。
 
-- [x] UPLOGIN-3：验证、Code Review、归档
-  - 目标：完成质量闭环与审计文档。
+- [x] VSROUTE-3：Code Review、归档与发布准备
+  - 目标：完成审计闭环，并给出下游依赖升级建议。
   - 涉及文件：
-    - `docs/change/2026-03-05_auth-up-login-sender-pub-fix.md`
+    - `docs/change/2026-03-05_varstore-crosshop-routing.md`
   - 验收条件：
-    - 测试命令通过并记录；
-    - Review 清单逐项给出通过/不通过结论；
-    - docs/change 归档完整（背景、任务映射、权衡、验证、回滚）。
-  - 测试点：
-    - `go test ./auth -count=1 -p 1`
+    - Review 清单逐项通过；
+    - docs/change 完整记录背景、任务映射、验证、回滚。
   - 回滚点：
-    - 按提交回滚或按任务粒度回滚。
+    - 回滚文档与版本发布动作。
 
 ## 依赖关系
-- `UPLOGIN-1 -> UPLOGIN-2 -> UPLOGIN-3`
+- `VSROUTE-1 -> VSROUTE-2 -> VSROUTE-3`
 
 ## 风险与注意事项
-- 本修复影响 Auth 上行校验与路由传播，属于链路关键路径；必须保持 wire 字段不变，仅修正字段值来源。
-- 不改 VarStore/Win 协议调用参数，避免引入跨仓耦合变更。
-
-## 当前执行状态
-- 已完成：UPLOGIN-1、UPLOGIN-2、UPLOGIN-3
-- 进行中：无
-- 待完成：无
+- 转发逻辑位于子协议关键路径，必须避免回环与 hop-limit 违规。
+- 不改协议字段，仅补齐行为；确保与既有 Win/Android 客户端兼容。
