@@ -186,23 +186,42 @@ func (h *Handler) handleReadRequest(ctx context.Context, conn core.IConnection, 
 func (h *Handler) handleWriteRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req writeReq) {
 	op := strings.ToLower(strings.TrimSpace(req.Op))
 	requester := hdr.SourceID()
-	if op != opOffer {
+	switch op {
+	case opOffer:
+		if req.Target == 0 {
+			h.sendWriteResp(ctx, hdr, requester, writeResp{Code: 400, Msg: "target required", Op: opOffer})
+			return
+		}
+		h.routeCtrlRequest(ctx, conn, hdr, payload, requester, permWrite, req.Target,
+			func(code int, msg string) {
+				h.sendWriteResp(ctx, hdr, requester, writeResp{Code: code, Msg: msg, Op: opOffer, SessionID: strings.TrimSpace(req.SessionID)})
+			},
+			func(cfg handlerConfig) {
+				h.handleOfferAsConsumer(ctx, hdr, req, cfg)
+			},
+		)
+	case opMkdir:
+		if req.Target == 0 {
+			h.sendWriteResp(ctx, hdr, requester, writeResp{Code: 400, Msg: "target required", Op: opMkdir})
+			return
+		}
+		h.routeCtrlRequest(ctx, conn, hdr, payload, requester, permWrite, req.Target,
+			func(code int, msg string) {
+				h.sendWriteResp(ctx, hdr, requester, writeResp{
+					Code: code,
+					Msg:  msg,
+					Op:   opMkdir,
+					Dir:  strings.TrimSpace(req.Dir),
+					Name: strings.TrimSpace(req.Name),
+				})
+			},
+			func(cfg handlerConfig) {
+				h.handleMkdirLocal(ctx, hdr, req, cfg)
+			},
+		)
+	default:
 		h.sendWriteResp(ctx, hdr, requester, writeResp{Code: 400, Msg: "invalid op", Op: op})
-		return
 	}
-	if req.Target == 0 {
-		h.sendWriteResp(ctx, hdr, requester, writeResp{Code: 400, Msg: "target required", Op: opOffer})
-		return
-	}
-
-	h.routeCtrlRequest(ctx, conn, hdr, payload, requester, permWrite, req.Target,
-		func(code int, msg string) {
-			h.sendWriteResp(ctx, hdr, requester, writeResp{Code: code, Msg: msg, Op: opOffer, SessionID: strings.TrimSpace(req.SessionID)})
-		},
-		func(cfg handlerConfig) {
-			h.handleOfferAsConsumer(ctx, hdr, req, cfg)
-		},
-	)
 }
 
 func (h *Handler) routeCtrlRequest(
@@ -513,6 +532,29 @@ func (h *Handler) handleListLocal(ctx context.Context, hdr core.IHeader, req rea
 	sort.Strings(dirs)
 	sort.Strings(files)
 	h.sendReadResp(ctx, hdr, requester, readResp{Code: 1, Msg: "ok", Op: opList, Dir: dir, Files: files, Dirs: dirs})
+}
+
+func (h *Handler) handleMkdirLocal(ctx context.Context, hdr core.IHeader, req writeReq, cfg handlerConfig) {
+	requester := uint32(0)
+	if hdr != nil {
+		requester = hdr.SourceID()
+	}
+	dir, name, code, msg := mkdirLocalDir(cfg.BaseDir, req.Dir, req.Name)
+	resp := writeResp{
+		Code: code,
+		Msg:  msg,
+		Op:   opMkdir,
+		Dir:  dir,
+		Name: name,
+	}
+	if code == 1 {
+		srv := core.ServerFromContext(ctx)
+		if srv != nil {
+			resp.Provider = srv.NodeID()
+			resp.Consumer = requester
+		}
+	}
+	h.sendWriteResp(ctx, hdr, requester, resp)
 }
 
 func (h *Handler) handleReadTextLocal(ctx context.Context, hdr core.IHeader, req readReq, cfg handlerConfig) {

@@ -24,6 +24,7 @@ const (
 	opOffer    = protocol.OpOffer
 	opList     = protocol.OpList
 	opReadText = protocol.OpReadText
+	opMkdir    = "mkdir"
 )
 
 type message = protocol.Message
