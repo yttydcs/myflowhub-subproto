@@ -22,8 +22,8 @@ func registerVarActions(h *VarStoreHandler) []core.SubProcessAction {
 		kit.NewAction(varActionAssistSetResp, func(ctx context.Context, _ core.IConnection, _ core.IHeader, data json.RawMessage) {
 			h.handleSetResp(ctx, data)
 		}),
-		kit.NewAction(varActionUpSet, func(ctx context.Context, _ core.IConnection, hdr core.IHeader, data json.RawMessage) {
-			h.handleUpSet(ctx, hdr, data)
+		kit.NewAction(varActionUpSet, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+			h.handleUpSet(ctx, conn, hdr, data)
 		}),
 		kit.NewAction(varActionNotifySet, func(ctx context.Context, _ core.IConnection, hdr core.IHeader, data json.RawMessage) {
 			h.handleNotifySet(ctx, hdr, data)
@@ -67,8 +67,8 @@ func registerVarActions(h *VarStoreHandler) []core.SubProcessAction {
 		kit.NewAction(varActionAssistRevokeResp, func(ctx context.Context, _ core.IConnection, _ core.IHeader, data json.RawMessage) {
 			h.handleRevokeResp(ctx, data)
 		}),
-		kit.NewAction(varActionUpRevoke, func(ctx context.Context, _ core.IConnection, hdr core.IHeader, data json.RawMessage) {
-			h.handleUpRevoke(ctx, hdr, data)
+		kit.NewAction(varActionUpRevoke, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+			h.handleUpRevoke(ctx, conn, hdr, data)
 		}),
 		kit.NewAction(varActionNotifyRevoke, func(ctx context.Context, _ core.IConnection, hdr core.IHeader, data json.RawMessage) {
 			h.handleNotifyRevoke(ctx, hdr, data)

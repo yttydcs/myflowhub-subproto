@@ -83,6 +83,16 @@ func (h *VarStoreHandler) OnReceive(ctx context.Context, conn core.IConnection, 
 		h.log.Warn("varstore invalid payload", "err", err)
 		return
 	}
+	if h.shouldForwardByHeaderTarget(ctx, hdr, msg.Action) {
+		forwarded, code, msgText := h.forwardCmdByHeaderTarget(ctx, conn, hdr, payload)
+		if forwarded {
+			return
+		}
+		if code != 0 {
+			h.sendForwardError(ctx, conn, hdr, msg, code, msgText)
+			return
+		}
+	}
 	entry, ok := h.LookupAction(msg.Action)
 	if !ok {
 		h.log.Debug("unknown varstore action", "action", msg.Action)
@@ -552,11 +562,12 @@ func (h *VarStoreHandler) handleVarDeleted(ctx context.Context, hdr core.IHeader
 }
 
 // up_* handlers
-func (h *VarStoreHandler) handleUpSet(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
+func (h *VarStoreHandler) handleUpSet(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req setReq
 	if err := json.Unmarshal(data, &req); err != nil || req.Owner == 0 || req.Name == "" {
 		return
 	}
+	h.indexOwnerRoute(ctx, req.Owner, conn)
 	existing, _ := h.lookupOwned(req.Owner, req.Name)
 	wasPublic := existing.IsPublic
 	rec := existing
@@ -579,7 +590,7 @@ func (h *VarStoreHandler) handleUpSet(ctx context.Context, hdr core.IHeader, dat
 	}
 }
 
-func (h *VarStoreHandler) handleUpRevoke(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
+func (h *VarStoreHandler) handleUpRevoke(ctx context.Context, _ core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req getReq
 	if err := json.Unmarshal(data, &req); err != nil || req.Owner == 0 || req.Name == "" {
 		return
@@ -641,6 +652,21 @@ func (h *VarStoreHandler) ownerInSubtree(ctx context.Context, owner uint32) bool
 		return true
 	}
 	return false
+}
+
+func (h *VarStoreHandler) indexOwnerRoute(ctx context.Context, owner uint32, conn core.IConnection) {
+	if owner == 0 || conn == nil || isParentConnVar(conn) {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil || srv.ConnManager() == nil {
+		return
+	}
+	cm := srv.ConnManager()
+	if existing, ok := cm.GetByNode(owner); ok && existing != nil {
+		return
+	}
+	cm.AddNodeIndex(owner, conn)
 }
 
 func (h *VarStoreHandler) lookupOwned(owner uint32, name string) (varRecord, bool) {
@@ -1277,6 +1303,102 @@ func (h *VarStoreHandler) forward(ctx context.Context, target core.IConnection, 
 	_ = target.SendWithHeader(hdr, payload, codec)
 }
 
+func (h *VarStoreHandler) shouldForwardByHeaderTarget(ctx context.Context, hdr core.IHeader, action string) bool {
+	if hdr == nil || hdr.Major() != header.MajorCmd || hdr.TargetID() == 0 {
+		return false
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil || hdr.TargetID() == srv.NodeID() {
+		return false
+	}
+	// 响应帧由 pending/resp 路径消费，避免被路由转发短路。
+	return !strings.HasSuffix(strings.ToLower(strings.TrimSpace(action)), "_resp")
+}
+
+func (h *VarStoreHandler) forwardCmdByHeaderTarget(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) (bool, int, string) {
+	if conn == nil || hdr == nil || len(payload) == 0 {
+		return false, 2, "invalid frame"
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil || srv.ConnManager() == nil {
+		return false, 2, "no server context"
+	}
+	target := hdr.TargetID()
+	if target == 0 || target == srv.NodeID() {
+		return false, 0, ""
+	}
+
+	cm := srv.ConnManager()
+	var next core.IConnection
+	if c, ok := cm.GetByNode(target); ok && c != nil {
+		next = c
+	} else {
+		next = h.findParent(ctx)
+	}
+	if next == nil {
+		return false, 4, "not found"
+	}
+	if next.ID() == conn.ID() {
+		return false, 4, "not found"
+	}
+	if isParentConnVar(conn) && isParentConnVar(next) {
+		return false, 4, "not found"
+	}
+
+	fwdHdr, ok := header.CloneToTCPForForward(hdr)
+	if !ok {
+		return false, 2, "hop limit exceeded"
+	}
+	fwdHdr.WithTargetID(target)
+	if err := srv.Send(ctx, next.ID(), fwdHdr, payload); err != nil {
+		h.log.Error("forward varstore frame failed", "err", err, "target", target, "source", hdr.SourceID())
+		return false, 2, "forward failed"
+	}
+	return true, 0, ""
+}
+
+func (h *VarStoreHandler) sendForwardError(ctx context.Context, conn core.IConnection, req core.IHeader, frame varMessage, code int, msg string) {
+	if conn == nil || req == nil {
+		return
+	}
+	action, data := buildForwardError(frame.Action, frame.Data, code, msg)
+	if action == "" {
+		return
+	}
+	h.sendResp(ctx, conn, req, action, data)
+}
+
+func buildForwardError(action string, data json.RawMessage, code int, msg string) (string, varResp) {
+	switch action {
+	case varActionSet, varActionAssistSet:
+		var req setReq
+		_ = json.Unmarshal(data, &req)
+		return chooseSetResp(action == varActionAssistSet), varResp{Code: code, Msg: msg, Name: req.Name, Owner: req.Owner}
+	case varActionGet, varActionAssistGet:
+		var req getReq
+		_ = json.Unmarshal(data, &req)
+		return chooseGetResp(action == varActionAssistGet), varResp{Code: code, Msg: msg, Name: req.Name, Owner: req.Owner}
+	case varActionList, varActionAssistList:
+		var req listReq
+		_ = json.Unmarshal(data, &req)
+		return chooseListResp(action == varActionAssistList), varResp{Code: code, Msg: msg, Owner: req.Owner}
+	case varActionRevoke, varActionAssistRevoke:
+		var req getReq
+		_ = json.Unmarshal(data, &req)
+		return chooseRevokeResp(action == varActionAssistRevoke), varResp{Code: code, Msg: msg, Name: req.Name, Owner: req.Owner}
+	case varActionSubscribe, varActionAssistSubscribe:
+		var req subscribeReq
+		_ = json.Unmarshal(data, &req)
+		return chooseSubscribeResp(action == varActionAssistSubscribe), varResp{Code: code, Msg: msg, Name: req.Name, Owner: req.Owner}
+	case varActionUnsubscribe, varActionAssistUnsubscribe:
+		var req subscribeReq
+		_ = json.Unmarshal(data, &req)
+		return chooseSubscribeResp(action == varActionAssistUnsubscribe), varResp{Code: code, Msg: msg, Name: req.Name, Owner: req.Owner}
+	default:
+		return "", varResp{}
+	}
+}
+
 func (h *VarStoreHandler) sendNotifySet(ctx context.Context, owner uint32, name string, rec varRecord) {
 	if owner == 0 || name == "" {
 		return
@@ -1351,6 +1473,18 @@ func findParentConnVar(cm core.IConnectionManager) (core.IConnection, bool) {
 		return true
 	})
 	return parent, parent != nil
+}
+
+func isParentConnVar(c core.IConnection) bool {
+	if c == nil {
+		return false
+	}
+	if role, ok := c.GetMeta(core.MetaRoleKey); ok {
+		if s, ok2 := role.(string); ok2 && s == core.RoleParent {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *VarStoreHandler) hasPermission(nodeID uint32, perm string) bool {
