@@ -61,30 +61,14 @@ func (h *LoginHandler) handleUpLogin(ctx context.Context, conn core.IConnection,
 
 func (h *LoginHandler) sendUpLogin(ctx context.Context, conn core.IConnection, deviceID string, nodeID uint32, pubKey []byte, devSig, devAlg string, devTS int64, devNonce string) {
 	parent := h.selectAuthorityConn(ctx)
-	if parent == nil || nodeID == 0 || len(pubKey) == 0 || strings.TrimSpace(devSig) == "" || !strings.EqualFold(strings.TrimSpace(devAlg), defaultAlgES256) {
+	if parent == nil {
 		return
 	}
-	if h.nodePriv == nil || strings.TrimSpace(h.nodePubB64) == "" {
+	local := localNodeID(ctx)
+	data, ok := h.buildUpLoginData(local, deviceID, nodeID, pubKey, devSig, devAlg, devTS, devNonce)
+	if !ok {
 		return
 	}
-	data := upLoginData{
-		NodeID:      nodeID,
-		DeviceID:    deviceID,
-		HubID:       localNodeID(ctx),
-		PubKey:      encodePubKey(pubKey),
-		TS:          time.Now().Unix(),
-		DeviceTS:    devTS,
-		DeviceNonce: devNonce,
-		DeviceSig:   devSig,
-		DeviceAlg:   devAlg,
-		SenderID:    localNodeID(ctx),
-		SenderTS:    time.Now().Unix(),
-		SenderNonce: "",
-		SenderAlg:   defaultAlgES256,
-		SenderPub:   encodePubKey(pubKey),
-		Alg:         defaultAlgES256,
-	}
-	data.SenderSig = signWithNodeKey(h.nodePriv, upLoginSenderSignBytes(data))
 	raw, _ := json.Marshal(data)
 	payload, _ := json.Marshal(message{Action: actionUpLogin, Data: raw})
 	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(2)
@@ -102,6 +86,42 @@ func (h *LoginHandler) sendUpLogin(ctx context.Context, conn core.IConnection, d
 		_ = srv.Send(ctx, parent.ID(), hdr, payload)
 		return
 	}
+}
+
+func (h *LoginHandler) buildUpLoginData(localNode uint32, deviceID string, nodeID uint32, nodePubRaw []byte, devSig, devAlg string, devTS int64, devNonce string) (upLoginData, bool) {
+	if localNode == 0 || nodeID == 0 || len(nodePubRaw) == 0 {
+		return upLoginData{}, false
+	}
+	if strings.TrimSpace(devSig) == "" || !strings.EqualFold(strings.TrimSpace(devAlg), defaultAlgES256) {
+		return upLoginData{}, false
+	}
+	if h.nodePriv == nil || strings.TrimSpace(h.nodePubB64) == "" {
+		return upLoginData{}, false
+	}
+	now := time.Now().Unix()
+	data := upLoginData{
+		NodeID:      nodeID,
+		DeviceID:    deviceID,
+		HubID:       localNode,
+		PubKey:      encodePubKey(nodePubRaw),
+		TS:          now,
+		DeviceTS:    devTS,
+		DeviceNonce: devNonce,
+		DeviceSig:   devSig,
+		DeviceAlg:   devAlg,
+		SenderID:    localNode,
+		SenderTS:    now,
+		SenderNonce: "",
+		SenderAlg:   defaultAlgES256,
+		// SenderPub 必须是 sender(当前节点)公钥，不能复用登录节点公钥。
+		SenderPub: strings.TrimSpace(h.nodePubB64),
+		Alg:       defaultAlgES256,
+	}
+	data.SenderSig = signWithNodeKey(h.nodePriv, upLoginSenderSignBytes(data))
+	if strings.TrimSpace(data.SenderSig) == "" {
+		return upLoginData{}, false
+	}
+	return data, true
 }
 
 func registerUpLoginActions(h *LoginHandler) []core.SubProcessAction {
