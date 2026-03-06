@@ -78,12 +78,25 @@ type pendingSubscriber struct {
 }
 
 type pendingWaiter struct {
-	connID  string
-	msgID   uint32
-	traceID uint32
+	connID    string
+	requester uint32 // original actor SourceID
+	msgID     uint32
+	traceID   uint32
 }
 
 type connClosedEvent struct {
 	ConnID string
 	NodeID uint32
+}
+
+type pendingWriteWaiter struct {
+	connID    string
+	requester uint32 // original actor SourceID
+	msgID     uint32
+	traceID   uint32
+}
+
+type pendingWrite struct {
+	createdAt int64 // unix nano
+	waiters   []pendingWriteWaiter
 }

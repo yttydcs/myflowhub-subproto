@@ -2,11 +2,15 @@ package varstore
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	core "github.com/yttydcs/myflowhub-core"
 	coreconfig "github.com/yttydcs/myflowhub-core/config"
@@ -23,7 +27,9 @@ type VarStoreHandler struct {
 	mu      sync.RWMutex
 	records map[string]varRecord           // key: owner:name
 	pending map[pendingKey][]pendingWaiter // (owner,name,kind) -> waiting downstream requests
+	writing map[uint32]pendingWrite        // upstream msg_id -> pending write waiters (set/revoke)
 	cache   map[string]map[uint32]bool     // name -> owners known
+	sweepAt int64
 
 	subscriptions map[string]map[uint32]map[string]struct{} // key -> subscriber node -> connIDs
 	connSubs      map[string]map[string]struct{}            // connID -> key set
@@ -51,6 +57,7 @@ func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreH
 		log:           log,
 		records:       make(map[string]varRecord),
 		pending:       make(map[pendingKey][]pendingWaiter),
+		writing:       make(map[uint32]pendingWrite),
 		cache:         make(map[string]map[uint32]bool),
 		subscriptions: make(map[string]map[uint32]map[string]struct{}),
 		connSubs:      make(map[string]map[string]struct{}),
@@ -66,6 +73,31 @@ func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreH
 	return h
 }
 
+const (
+	pendingWriteTTL           = 90 * time.Second
+	pendingWriteSweepInterval = 15 * time.Second
+)
+
+var writeMsgSeq atomic.Uint32
+var writeMsgSeqInit sync.Once
+
+func nextWriteMsgID() uint32 {
+	writeMsgSeqInit.Do(func() {
+		var seed [4]byte
+		if _, err := rand.Read(seed[:]); err != nil {
+			writeMsgSeq.Store(uint32(time.Now().UnixNano()))
+			return
+		}
+		writeMsgSeq.Store(binary.BigEndian.Uint32(seed[:]))
+	})
+
+	v := writeMsgSeq.Add(1)
+	if v == 0 {
+		v = writeMsgSeq.Add(1)
+	}
+	return v
+}
+
 // AcceptCmd 声明 Cmd 帧在 target!=local 时也需要本地处理一次。
 func (h *VarStoreHandler) AcceptCmd() bool { return true }
 
@@ -78,6 +110,7 @@ func (h *VarStoreHandler) Init() bool {
 
 func (h *VarStoreHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	h.ensureConnCloseSubscription(ctx)
+	h.maybeSweepWriting(time.Now())
 	var msg varMessage
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		h.log.Warn("varstore invalid payload", "err", err)
@@ -85,12 +118,15 @@ func (h *VarStoreHandler) OnReceive(ctx context.Context, conn core.IConnection, 
 	}
 	if h.shouldForwardByHeaderTarget(ctx, hdr, msg.Action) {
 		forwarded, code, msgText := h.forwardCmdByHeaderTarget(ctx, conn, hdr, payload)
-		if forwarded {
+		needsLocal := msg.Action == varActionNotifySet || msg.Action == varActionNotifyRevoke
+		if forwarded && !needsLocal {
 			return
 		}
 		if code != 0 {
 			h.sendForwardError(ctx, conn, hdr, msg, code, msgText)
-			return
+			if !needsLocal {
+				return
+			}
 		}
 	}
 	entry, ok := h.LookupAction(msg.Action)
@@ -108,6 +144,7 @@ func (h *VarStoreHandler) handleSet(ctx context.Context, conn core.IConnection, 
 		h.sendResp(ctx, conn, hdr, chooseSetResp(assisted), varResp{Code: 2, Msg: "invalid set", Name: req.Name, Owner: req.Owner})
 		return
 	}
+	actorID := permission.SourceNodeID(hdr, conn)
 	owner := req.Owner
 	if owner == 0 {
 		if owners, ok := h.cache[req.Name]; ok && len(owners) == 1 {
@@ -130,15 +167,19 @@ func (h *VarStoreHandler) handleSet(ctx context.Context, conn core.IConnection, 
 	// 判断是否在当前子树
 	if !h.ownerInSubtree(ctx, owner) {
 		if parent := h.findParent(ctx); parent != nil {
-			h.addPending(owner, req.Name, conn.ID(), pendingKindSet, hdr)
-			h.forward(ctx, parent, varActionAssistSet, req, srv.NodeID())
+			upMsgID := nextWriteMsgID()
+			h.addPendingWrite(upMsgID, pendingWriteWaiter{
+				connID:    conn.ID(),
+				requester: actorID,
+				msgID:     hdr.GetMsgID(),
+				traceID:   hdr.GetTraceID(),
+			})
+			h.forwardWithMsg(ctx, parent, varActionAssistSet, req, actorID, upMsgID, hdr.GetTraceID())
 			return
 		}
 		h.sendResp(ctx, conn, hdr, chooseSetResp(assisted), varResp{Code: 4, Msg: "not found", Name: req.Name, Owner: owner})
 		return
 	}
-
-	actorID := permission.SourceNodeID(hdr, conn)
 	existing, found := h.lookupOwned(owner, req.Name)
 	wasPublic := existing.IsPublic
 
@@ -188,7 +229,7 @@ func (h *VarStoreHandler) handleSet(ctx context.Context, conn core.IConnection, 
 
 	// 向上同步缓存
 	if parent := h.findParent(ctx); parent != nil {
-		h.forward(ctx, parent, varActionUpSet, req, srv.NodeID())
+		h.forward(ctx, parent, varActionUpSet, req, actorID)
 	}
 
 	// 响应与通知：始终回请求者；若请求者!=owner，则额外通知 owner
@@ -196,12 +237,13 @@ func (h *VarStoreHandler) handleSet(ctx context.Context, conn core.IConnection, 
 		Code:       1,
 		Msg:        "ok",
 		Name:       req.Name,
+		Value:      rec.Value,
 		Owner:      owner,
 		Visibility: rec.Visibility,
 		Type:       rec.Type,
 	})
 	if actorID != owner {
-		h.sendNotifySet(ctx, owner, req.Name, rec)
+		h.sendNotifySet(ctx, actorID, owner, req.Name, rec)
 	}
 }
 
@@ -242,7 +284,7 @@ func (h *VarStoreHandler) handleGet(ctx context.Context, conn core.IConnection, 
 
 	if parent := h.findParent(ctx); parent != nil {
 		h.addPending(owner, req.Name, conn.ID(), pendingKindGet, hdr)
-		h.forward(ctx, parent, varActionAssistGet, req, srv.NodeID())
+		h.forward(ctx, parent, varActionAssistGet, req, permission.SourceNodeID(hdr, conn))
 		return
 	}
 	h.sendResp(ctx, conn, hdr, chooseGetResp(assisted), varResp{Code: 4, Msg: "not found", Name: req.Name, Owner: owner})
@@ -266,18 +308,20 @@ func (h *VarStoreHandler) handleList(ctx context.Context, conn core.IConnection,
 		return
 	}
 
-	names := h.listPublicNames(owner)
-	if len(names) > 0 {
+	actorID := permission.SourceNodeID(hdr, conn)
+	includePrivate := actorID == owner || h.hasPermission(actorID, permission.VarPrivateSet)
+	names := h.listNames(owner, includePrivate)
+	if len(names) > 0 || srv.NodeID() == owner || h.findParent(ctx) == nil {
 		h.sendResp(ctx, conn, hdr, chooseListResp(assisted), varResp{Code: 1, Msg: "ok", Owner: owner, Names: names})
 		return
 	}
 
 	if parent := h.findParent(ctx); parent != nil {
 		h.addPending(owner, "", conn.ID(), pendingKindList, hdr)
-		h.forward(ctx, parent, varActionAssistList, req, srv.NodeID())
+		h.forward(ctx, parent, varActionAssistList, req, actorID)
 		return
 	}
-	h.sendResp(ctx, conn, hdr, chooseListResp(assisted), varResp{Code: 4, Msg: "not found", Owner: owner})
+	h.sendResp(ctx, conn, hdr, chooseListResp(assisted), varResp{Code: 1, Msg: "ok", Owner: owner, Names: nil})
 }
 
 // revoke / assist_revoke
@@ -297,18 +341,24 @@ func (h *VarStoreHandler) handleRevoke(ctx context.Context, conn core.IConnectio
 	if srv == nil {
 		return
 	}
+	actorID := permission.SourceNodeID(hdr, conn)
 
 	if !h.ownerInSubtree(ctx, owner) {
 		if parent := h.findParent(ctx); parent != nil {
-			h.addPending(owner, req.Name, conn.ID(), pendingKindRevoke, hdr)
-			h.forward(ctx, parent, varActionAssistRevoke, req, srv.NodeID())
+			upMsgID := nextWriteMsgID()
+			h.addPendingWrite(upMsgID, pendingWriteWaiter{
+				connID:    conn.ID(),
+				requester: actorID,
+				msgID:     hdr.GetMsgID(),
+				traceID:   hdr.GetTraceID(),
+			})
+			h.forwardWithMsg(ctx, parent, varActionAssistRevoke, req, actorID, upMsgID, hdr.GetTraceID())
 			return
 		}
 		h.sendResp(ctx, conn, hdr, chooseRevokeResp(assisted), varResp{Code: 4, Msg: "not found", Name: req.Name, Owner: owner})
 		return
 	}
 
-	actorID := permission.SourceNodeID(hdr, conn)
 	if actorID != owner && !h.hasPermission(actorID, permission.VarRevoke) {
 		h.sendResp(ctx, conn, hdr, chooseRevokeResp(assisted), varResp{Code: 3, Msg: "forbidden", Name: req.Name, Owner: owner})
 		return
@@ -317,8 +367,14 @@ func (h *VarStoreHandler) handleRevoke(ctx context.Context, conn core.IConnectio
 	if _, ok := h.lookupOwned(owner, req.Name); !ok {
 		// 尝试继续向上查询
 		if parent := h.findParent(ctx); parent != nil {
-			h.addPending(owner, req.Name, conn.ID(), pendingKindRevoke, hdr)
-			h.forward(ctx, parent, varActionAssistRevoke, req, srv.NodeID())
+			upMsgID := nextWriteMsgID()
+			h.addPendingWrite(upMsgID, pendingWriteWaiter{
+				connID:    conn.ID(),
+				requester: actorID,
+				msgID:     hdr.GetMsgID(),
+				traceID:   hdr.GetTraceID(),
+			})
+			h.forwardWithMsg(ctx, parent, varActionAssistRevoke, req, actorID, upMsgID, hdr.GetTraceID())
 			return
 		}
 		h.sendResp(ctx, conn, hdr, chooseRevokeResp(assisted), varResp{Code: 4, Msg: "not found", Name: req.Name, Owner: owner})
@@ -329,22 +385,25 @@ func (h *VarStoreHandler) handleRevoke(ctx context.Context, conn core.IConnectio
 	h.handleDeletion(ctx, owner, req.Name, actorID, hdrSourceID(hdr), owner)
 
 	if parent := h.findParent(ctx); parent != nil {
-		h.forward(ctx, parent, varActionUpRevoke, req, srv.NodeID())
+		h.forward(ctx, parent, varActionUpRevoke, req, actorID)
 	}
 
 	h.sendResp(ctx, conn, hdr, chooseRevokeResp(assisted), varResp{Code: 1, Msg: "ok", Name: req.Name, Owner: owner})
 	if actorID != owner {
-		h.sendNotifyRevoke(ctx, owner, req.Name)
+		h.sendNotifyRevoke(ctx, actorID, owner, req.Name)
 	}
 }
 
 // responses from upstream
-func (h *VarStoreHandler) handleSetResp(ctx context.Context, data json.RawMessage) {
+func (h *VarStoreHandler) handleSetResp(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
 	var resp varResp
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return
 	}
-	waiters := h.popPending(resp.Owner, resp.Name, pendingKindSet)
+	var writeWaiters []pendingWriteWaiter
+	if hdr != nil && hdr.GetMsgID() != 0 {
+		writeWaiters = h.popPendingWrite(hdr.GetMsgID())
+	}
 	if resp.Code == 1 {
 		rec := varRecord{
 			Value:      resp.Value,
@@ -355,6 +414,11 @@ func (h *VarStoreHandler) handleSetResp(ctx context.Context, data json.RawMessag
 		}
 		h.saveRecord(resp.Name, rec)
 	}
+	if len(writeWaiters) > 0 {
+		h.broadcastPendingWriteResp(ctx, writeWaiters, varActionSetResp, resp)
+		return
+	}
+	waiters := h.popPending(resp.Owner, resp.Name, pendingKindSet)
 	h.broadcastPendingResp(ctx, waiters, varActionSetResp, resp)
 }
 
@@ -386,16 +450,24 @@ func (h *VarStoreHandler) handleListResp(ctx context.Context, data json.RawMessa
 	h.broadcastPendingResp(ctx, waiters, varActionListResp, resp)
 }
 
-func (h *VarStoreHandler) handleRevokeResp(ctx context.Context, data json.RawMessage) {
+func (h *VarStoreHandler) handleRevokeResp(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
 	var resp varResp
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return
 	}
-	waiters := h.popPending(resp.Owner, resp.Name, pendingKindRevoke)
+	var writeWaiters []pendingWriteWaiter
+	if hdr != nil && hdr.GetMsgID() != 0 {
+		writeWaiters = h.popPendingWrite(hdr.GetMsgID())
+	}
 	if resp.Code == 1 {
 		h.deleteRecord(resp.Owner, resp.Name)
 		h.handleDeletion(ctx, resp.Owner, resp.Name)
 	}
+	if len(writeWaiters) > 0 {
+		h.broadcastPendingWriteResp(ctx, writeWaiters, varActionRevokeResp, resp)
+		return
+	}
+	waiters := h.popPending(resp.Owner, resp.Name, pendingKindRevoke)
 	h.broadcastPendingResp(ctx, waiters, varActionRevokeResp, resp)
 }
 
@@ -406,14 +478,16 @@ func (h *VarStoreHandler) handleSubscribe(ctx context.Context, conn core.IConnec
 		h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{Code: 2, Msg: "invalid subscribe", Name: req.Name, Owner: req.Owner})
 		return
 	}
-	subscriber := req.Subscriber
-	if subscriber == 0 {
-		subscriber = permission.SourceNodeID(hdr, conn)
-	}
-	if subscriber == 0 {
+	actorID := permission.SourceNodeID(hdr, conn)
+	if actorID == 0 {
 		h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{Code: 2, Msg: "subscriber required", Name: req.Name, Owner: req.Owner})
 		return
 	}
+	if req.Subscriber != 0 && req.Subscriber != actorID {
+		h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{Code: 2, Msg: "invalid subscriber", Name: req.Name, Owner: req.Owner})
+		return
+	}
+	subscriber := actorID
 	req.Subscriber = subscriber
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -441,7 +515,7 @@ func (h *VarStoreHandler) handleSubscribe(ctx context.Context, conn core.IConnec
 		alreadyPending := h.hasPendingSubscribe(req.Owner, req.Name)
 		h.addPendingSubscribe(req.Owner, req.Name, subscriber, conn.ID(), hdr)
 		if !alreadyPending {
-			h.forward(ctx, parent, varActionAssistSubscribe, req, srv.NodeID())
+			h.forward(ctx, parent, varActionAssistSubscribe, req, subscriber)
 		}
 		return
 	}
@@ -458,7 +532,7 @@ func (h *VarStoreHandler) handleSubscribeResp(ctx context.Context, hdr core.IHea
 	key := h.key(resp.Owner, resp.Name)
 	if resp.Code != 1 {
 		for _, p := range pending {
-			reqHdr := (&header.HeaderTcp{}).WithMsgID(p.msgID).WithTraceID(p.traceID)
+			reqHdr := (&header.HeaderTcp{}).WithSourceID(p.subscriber).WithMsgID(p.msgID).WithTraceID(p.traceID)
 			h.sendResp(ctx, h.lookupConn(ctx, p.connID), reqHdr, chooseSubscribeResp(false), varResp{
 				Code:  resp.Code,
 				Msg:   resp.Msg,
@@ -484,7 +558,7 @@ func (h *VarStoreHandler) handleSubscribeResp(ctx context.Context, hdr core.IHea
 	}
 	for _, p := range pending {
 		if !rec.IsPublic && p.subscriber != resp.Owner && !h.hasPermission(p.subscriber, permission.VarSubscribe) {
-			reqHdr := (&header.HeaderTcp{}).WithMsgID(p.msgID).WithTraceID(p.traceID)
+			reqHdr := (&header.HeaderTcp{}).WithSourceID(p.subscriber).WithMsgID(p.msgID).WithTraceID(p.traceID)
 			h.sendResp(ctx, h.lookupConn(ctx, p.connID), reqHdr, chooseSubscribeResp(false), varResp{
 				Code:  3,
 				Msg:   "forbidden",
@@ -494,7 +568,7 @@ func (h *VarStoreHandler) handleSubscribeResp(ctx context.Context, hdr core.IHea
 			continue
 		}
 		h.addSubscription(resp.Owner, resp.Name, p.subscriber, p.connID)
-		reqHdr := (&header.HeaderTcp{}).WithMsgID(p.msgID).WithTraceID(p.traceID)
+		reqHdr := (&header.HeaderTcp{}).WithSourceID(p.subscriber).WithMsgID(p.msgID).WithTraceID(p.traceID)
 		h.sendResp(ctx, h.lookupConn(ctx, p.connID), reqHdr, chooseSubscribeResp(false), varResp{
 			Code:       1,
 			Msg:        "ok",
@@ -509,15 +583,26 @@ func (h *VarStoreHandler) handleSubscribeResp(ctx context.Context, hdr core.IHea
 func (h *VarStoreHandler) handleUnsubscribe(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
 	var req subscribeReq
 	if err := json.Unmarshal(data, &req); err != nil || !validVarName(req.Name) || req.Owner == 0 {
+		if !assisted {
+			h.sendResp(ctx, conn, hdr, chooseSubscribeResp(false), varResp{Code: 2, Msg: "invalid unsubscribe", Name: req.Name, Owner: req.Owner})
+		}
 		return
 	}
-	subscriber := req.Subscriber
-	if subscriber == 0 {
-		subscriber = permission.SourceNodeID(hdr, conn)
-	}
-	if subscriber == 0 {
+	actorID := permission.SourceNodeID(hdr, conn)
+	if actorID == 0 {
+		if !assisted {
+			h.sendResp(ctx, conn, hdr, chooseSubscribeResp(false), varResp{Code: 2, Msg: "subscriber required", Name: req.Name, Owner: req.Owner})
+		}
 		return
 	}
+	if req.Subscriber != 0 && req.Subscriber != actorID {
+		if !assisted {
+			h.sendResp(ctx, conn, hdr, chooseSubscribeResp(false), varResp{Code: 2, Msg: "invalid subscriber", Name: req.Name, Owner: req.Owner})
+		}
+		return
+	}
+	subscriber := actorID
+	req.Subscriber = subscriber
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
 		return
@@ -526,7 +611,7 @@ func (h *VarStoreHandler) handleUnsubscribe(ctx context.Context, conn core.IConn
 	h.removeSubscription(req.Owner, req.Name, subscriber, conn.ID())
 	if h.subscriberCount(key) == 0 && h.upstreamSubscribed(key) {
 		if parent := h.findParent(ctx); parent != nil {
-			h.forward(ctx, parent, varActionAssistUnsubscribe, req, srv.NodeID())
+			h.forward(ctx, parent, varActionAssistUnsubscribe, req, subscriber)
 		}
 		h.markUpstreamSubscribed(key, false)
 	}
@@ -568,6 +653,7 @@ func (h *VarStoreHandler) handleUpSet(ctx context.Context, conn core.IConnection
 		return
 	}
 	h.indexOwnerRoute(ctx, req.Owner, conn)
+	senderID := permission.SourceNodeID(nil, conn)
 	existing, _ := h.lookupOwned(req.Owner, req.Name)
 	wasPublic := existing.IsPublic
 	rec := existing
@@ -580,37 +666,39 @@ func (h *VarStoreHandler) handleUpSet(ctx context.Context, conn core.IConnection
 	if wasPublic && !rec.IsPublic {
 		h.handleVisibilityDowngrade(ctx, req.Owner, req.Name, hdrSourceID(hdr), hdr)
 	} else {
-		h.propagateChange(ctx, req.Owner, req.Name, rec, req.Owner, hdrSourceID(hdr))
+		h.propagateChange(ctx, req.Owner, req.Name, rec, req.Owner, senderID)
 	}
 	if parent := h.findParent(ctx); parent != nil {
 		srv := core.ServerFromContext(ctx)
 		if srv != nil {
-			h.forward(ctx, parent, varActionUpSet, req, srv.NodeID())
+			h.forward(ctx, parent, varActionUpSet, req, hdrSourceID(hdr))
 		}
 	}
 }
 
-func (h *VarStoreHandler) handleUpRevoke(ctx context.Context, _ core.IConnection, hdr core.IHeader, data json.RawMessage) {
+func (h *VarStoreHandler) handleUpRevoke(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req getReq
 	if err := json.Unmarshal(data, &req); err != nil || req.Owner == 0 || req.Name == "" {
 		return
 	}
+	senderID := permission.SourceNodeID(nil, conn)
 	h.deleteRecord(req.Owner, req.Name)
-	h.handleDeletion(ctx, req.Owner, req.Name, hdrSourceID(hdr))
+	h.handleDeletion(ctx, req.Owner, req.Name, senderID)
 	if parent := h.findParent(ctx); parent != nil {
 		srv := core.ServerFromContext(ctx)
 		if srv != nil {
-			h.forward(ctx, parent, varActionUpRevoke, req, srv.NodeID())
+			h.forward(ctx, parent, varActionUpRevoke, req, hdrSourceID(hdr))
 		}
 	}
 }
 
 // notify handlers
-func (h *VarStoreHandler) handleNotifySet(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
+func (h *VarStoreHandler) handleNotifySet(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var resp varResp
 	if err := json.Unmarshal(data, &resp); err != nil || resp.Name == "" || resp.Owner == 0 {
 		return
 	}
+	senderID := permission.SourceNodeID(nil, conn)
 	existing, _ := h.lookupOwned(resp.Owner, resp.Name)
 	wasPublic := existing.IsPublic
 	rec := existing
@@ -623,17 +711,41 @@ func (h *VarStoreHandler) handleNotifySet(ctx context.Context, hdr core.IHeader,
 	if wasPublic && !rec.IsPublic {
 		h.handleVisibilityDowngrade(ctx, resp.Owner, resp.Name, hdrSourceID(hdr), hdr)
 	} else {
-		h.propagateChange(ctx, resp.Owner, resp.Name, rec, resp.Owner, hdrSourceID(hdr))
+		h.propagateChange(ctx, resp.Owner, resp.Name, rec, resp.Owner, senderID)
 	}
 }
 
-func (h *VarStoreHandler) handleNotifyRevoke(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
+func (h *VarStoreHandler) handleNotifyRevoke(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var resp varResp
 	if err := json.Unmarshal(data, &resp); err != nil || resp.Owner == 0 || resp.Name == "" {
 		return
 	}
+	senderID := permission.SourceNodeID(nil, conn)
 	h.deleteRecord(resp.Owner, resp.Name)
-	h.handleDeletion(ctx, resp.Owner, resp.Name, hdrSourceID(hdr))
+	h.handleDeletion(ctx, resp.Owner, resp.Name, senderID)
+}
+
+func (h *VarStoreHandler) maybeSweepWriting(now time.Time) {
+	if h == nil {
+		return
+	}
+	nowNano := now.UnixNano()
+	last := atomic.LoadInt64(&h.sweepAt)
+	if nowNano-last < int64(pendingWriteSweepInterval) {
+		return
+	}
+	if !atomic.CompareAndSwapInt64(&h.sweepAt, last, nowNano) {
+		return
+	}
+
+	cutoff := nowNano - int64(pendingWriteTTL)
+	h.mu.Lock()
+	for msgID, p := range h.writing {
+		if p.createdAt == 0 || p.createdAt < cutoff {
+			delete(h.writing, msgID)
+		}
+	}
+	h.mu.Unlock()
 }
 
 // helpers
@@ -691,6 +803,10 @@ func (h *VarStoreHandler) saveRecord(name string, rec varRecord) {
 }
 
 func (h *VarStoreHandler) listPublicNames(owner uint32) []string {
+	return h.listNames(owner, false)
+}
+
+func (h *VarStoreHandler) listNames(owner uint32, includePrivate bool) []string {
 	if owner == 0 {
 		return nil
 	}
@@ -699,7 +815,7 @@ func (h *VarStoreHandler) listPublicNames(owner uint32) []string {
 	var names []string
 	prefix := strconv.FormatUint(uint64(owner), 10) + ":"
 	for key, rec := range h.records {
-		if !rec.IsPublic {
+		if !includePrivate && !rec.IsPublic {
 			continue
 		}
 		if strings.HasPrefix(key, prefix) {
@@ -868,6 +984,66 @@ func (h *VarStoreHandler) removeConnSubscriptions(connID string) []string {
 		delete(h.connSubs, connID)
 	}
 	return keysFromSet(keysSet)
+}
+
+func (h *VarStoreHandler) removeConnPending(connID string) {
+	if connID == "" {
+		return
+	}
+	h.mu.Lock()
+	for k, items := range h.pending {
+		if len(items) == 0 {
+			delete(h.pending, k)
+			continue
+		}
+		out := make([]pendingWaiter, 0, len(items))
+		for _, it := range items {
+			if it.connID != connID {
+				out = append(out, it)
+			}
+		}
+		if len(out) == 0 {
+			delete(h.pending, k)
+		} else {
+			h.pending[k] = out
+		}
+	}
+	for msgID, p := range h.writing {
+		if len(p.waiters) == 0 {
+			delete(h.writing, msgID)
+			continue
+		}
+		out := make([]pendingWriteWaiter, 0, len(p.waiters))
+		for _, it := range p.waiters {
+			if it.connID != connID {
+				out = append(out, it)
+			}
+		}
+		if len(out) == 0 {
+			delete(h.writing, msgID)
+			continue
+		}
+		p.waiters = out
+		h.writing[msgID] = p
+	}
+	for k, items := range h.pendingSubs {
+		if len(items) == 0 {
+			delete(h.pendingSubs, k)
+			continue
+		}
+		out := make([]pendingSubscriber, 0, len(items))
+		for _, it := range items {
+			if it.connID != connID {
+				out = append(out, it)
+			}
+		}
+		if len(out) == 0 {
+			delete(h.pendingSubs, k)
+		} else {
+			h.pendingSubs[k] = out
+		}
+	}
+	h.mu.Unlock()
 }
 
 func keysFromSet(set map[string]struct{}) []string {
@@ -1039,6 +1215,7 @@ func (h *VarStoreHandler) ensureConnCloseSubscription(ctx context.Context) {
 			if connID == "" {
 				return
 			}
+			h.removeConnPending(connID)
 			keys := h.removeConnSubscriptions(connID)
 			h.maybeUnsubscribeUpstream(evCtx, keys)
 		})
@@ -1204,13 +1381,15 @@ func splitKey(key string) (uint32, string) {
 func (h *VarStoreHandler) addPending(owner uint32, name, connID string, kind string, hdr core.IHeader) {
 	var msgID uint32
 	var traceID uint32
+	var requester uint32
 	if hdr != nil {
 		msgID = hdr.GetMsgID()
 		traceID = hdr.GetTraceID()
+		requester = hdr.SourceID()
 	}
 	h.mu.Lock()
 	k := pendingKey{owner: owner, name: name, kind: kind}
-	h.pending[k] = append(h.pending[k], pendingWaiter{connID: connID, msgID: msgID, traceID: traceID})
+	h.pending[k] = append(h.pending[k], pendingWaiter{connID: connID, requester: requester, msgID: msgID, traceID: traceID})
 	h.mu.Unlock()
 }
 
@@ -1223,12 +1402,48 @@ func (h *VarStoreHandler) popPending(owner uint32, name string, kind string) []p
 	return conns
 }
 
+func (h *VarStoreHandler) addPendingWrite(upMsgID uint32, waiter pendingWriteWaiter) {
+	if upMsgID == 0 || waiter.connID == "" {
+		return
+	}
+	nowNano := time.Now().UnixNano()
+	h.mu.Lock()
+	p := h.writing[upMsgID]
+	if p.createdAt == 0 {
+		p.createdAt = nowNano
+	}
+	p.waiters = append(p.waiters, waiter)
+	h.writing[upMsgID] = p
+	h.mu.Unlock()
+}
+
+func (h *VarStoreHandler) popPendingWrite(upMsgID uint32) []pendingWriteWaiter {
+	if upMsgID == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	p := h.writing[upMsgID]
+	delete(h.writing, upMsgID)
+	h.mu.Unlock()
+	return p.waiters
+}
+
 func (h *VarStoreHandler) broadcastPendingResp(ctx context.Context, waiters []pendingWaiter, action string, resp varResp) {
 	if len(waiters) == 0 {
 		return
 	}
 	for _, pending := range waiters {
-		reqHdr := (&header.HeaderTcp{}).WithMsgID(pending.msgID).WithTraceID(pending.traceID)
+		reqHdr := (&header.HeaderTcp{}).WithSourceID(pending.requester).WithMsgID(pending.msgID).WithTraceID(pending.traceID)
+		h.sendResp(ctx, h.lookupConn(ctx, pending.connID), reqHdr, action, resp)
+	}
+}
+
+func (h *VarStoreHandler) broadcastPendingWriteResp(ctx context.Context, waiters []pendingWriteWaiter, action string, resp varResp) {
+	if len(waiters) == 0 {
+		return
+	}
+	for _, pending := range waiters {
+		reqHdr := (&header.HeaderTcp{}).WithSourceID(pending.requester).WithMsgID(pending.msgID).WithTraceID(pending.traceID)
 		h.sendResp(ctx, h.lookupConn(ctx, pending.connID), reqHdr, action, resp)
 	}
 }
@@ -1246,10 +1461,9 @@ func (h *VarStoreHandler) lookupConn(ctx context.Context, id string) core.IConne
 
 func (h *VarStoreHandler) sendResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data varResp) {
 	msg := varMessage{Action: action}
-	raw, _ := json.Marshal(data)
-	msg.Data = raw
+	msg.Data = h.marshalRespData(action, data)
 	payload, _ := json.Marshal(msg)
-	hdr := h.buildRespHeader(ctx, reqHdr, data.Owner)
+	hdr := h.buildRespHeader(ctx, conn, reqHdr)
 	if srv := core.ServerFromContext(ctx); srv != nil && conn != nil {
 		_ = srv.Send(ctx, conn.ID(), hdr, payload)
 		return
@@ -1260,19 +1474,48 @@ func (h *VarStoreHandler) sendResp(ctx context.Context, conn core.IConnection, r
 	}
 }
 
-func (h *VarStoreHandler) buildRespHeader(ctx context.Context, reqHdr core.IHeader, target uint32) core.IHeader {
-	var base core.IHeader = &header.HeaderTcp{}
-	if reqHdr != nil {
-		base = reqHdr.Clone()
+func (h *VarStoreHandler) marshalRespData(action string, data varResp) json.RawMessage {
+	if (action == varActionListResp || action == varActionAssistListResp) && data.Code == 1 {
+		names := data.Names
+		if names == nil {
+			names = []string{}
+		}
+		wire := struct {
+			Code  int      `json:"code"`
+			Msg   string   `json:"msg,omitempty"`
+			Owner uint32   `json:"owner,omitempty"`
+			Names []string `json:"names"`
+		}{
+			Code:  data.Code,
+			Msg:   data.Msg,
+			Owner: data.Owner,
+			Names: names,
+		}
+		raw, _ := json.Marshal(wire)
+		return raw
 	}
+	raw, _ := json.Marshal(data)
+	return raw
+}
+
+func (h *VarStoreHandler) buildRespHeader(_ context.Context, conn core.IConnection, reqHdr core.IHeader) core.IHeader {
 	src := uint32(0)
-	if srv := core.ServerFromContext(ctx); srv != nil {
-		src = srv.NodeID()
+	if reqHdr != nil {
+		src = reqHdr.SourceID()
 	}
-	if target == 0 && reqHdr != nil && reqHdr.SourceID() != 0 {
-		target = reqHdr.SourceID()
+	target := uint32(0)
+	if conn != nil {
+		if nid, ok := conn.GetMeta("nodeID"); ok {
+			if v, ok2 := nid.(uint32); ok2 {
+				target = v
+			}
+		}
 	}
-	return base.WithMajor(header.MajorOKResp).WithSubProto(3).WithSourceID(src).WithTargetID(target)
+	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(3).WithSourceID(src).WithTargetID(target)
+	if reqHdr != nil {
+		hdr.WithMsgID(reqHdr.GetMsgID()).WithTraceID(reqHdr.GetTraceID())
+	}
+	return hdr
 }
 
 func (h *VarStoreHandler) forward(ctx context.Context, target core.IConnection, action string, data any, srcID uint32) {
@@ -1283,12 +1526,51 @@ func (h *VarStoreHandler) forward(ctx context.Context, target core.IConnection, 
 	msg := varMessage{Action: action, Data: payloadData}
 	payload, _ := json.Marshal(msg)
 	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(3)
-	if srv := core.ServerFromContext(ctx); srv != nil {
-		if srcID != 0 {
-			hdr.WithSourceID(srcID)
-		} else {
-			hdr.WithSourceID(srv.NodeID())
+	src := srcID
+	if src == 0 {
+		if srv := core.ServerFromContext(ctx); srv != nil {
+			src = srv.NodeID()
 		}
+	}
+	if src != 0 {
+		hdr.WithSourceID(src)
+	}
+	if nid, ok := target.GetMeta("nodeID"); ok {
+		if v, ok2 := nid.(uint32); ok2 {
+			hdr.WithTargetID(v)
+		}
+	}
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		_ = srv.Send(ctx, target.ID(), hdr, payload)
+		return
+	}
+	codec := header.HeaderTcpCodec{}
+	_ = target.SendWithHeader(hdr, payload, codec)
+}
+
+func (h *VarStoreHandler) forwardWithMsg(ctx context.Context, target core.IConnection, action string, data any, srcID uint32, msgID uint32, traceID uint32) {
+	if target == nil {
+		return
+	}
+	payloadData, _ := json.Marshal(data)
+	msg := varMessage{Action: action, Data: payloadData}
+	payload, _ := json.Marshal(msg)
+	hdr := (&header.HeaderTcp{}).WithMajor(header.MajorCmd).WithSubProto(3)
+
+	src := srcID
+	if src == 0 {
+		if srv := core.ServerFromContext(ctx); srv != nil {
+			src = srv.NodeID()
+		}
+	}
+	if src != 0 {
+		hdr.WithSourceID(src)
+	}
+	if msgID != 0 {
+		hdr.WithMsgID(msgID)
+	}
+	if traceID != 0 {
+		hdr.WithTraceID(traceID)
 	}
 	if nid, ok := target.GetMeta("nodeID"); ok {
 		if v, ok2 := nid.(uint32); ok2 {
@@ -1399,8 +1681,8 @@ func buildForwardError(action string, data json.RawMessage, code int, msg string
 	}
 }
 
-func (h *VarStoreHandler) sendNotifySet(ctx context.Context, owner uint32, name string, rec varRecord) {
-	if owner == 0 || name == "" {
+func (h *VarStoreHandler) sendNotifySet(ctx context.Context, actor uint32, owner uint32, name string, rec varRecord) {
+	if actor == 0 || owner == 0 || name == "" {
 		return
 	}
 	srv := core.ServerFromContext(ctx)
@@ -1421,13 +1703,13 @@ func (h *VarStoreHandler) sendNotifySet(ctx context.Context, owner uint32, name 
 	hdr := (&header.HeaderTcp{}).
 		WithMajor(header.MajorCmd).
 		WithSubProto(3).
-		WithSourceID(srv.NodeID()).
+		WithSourceID(actor).
 		WithTargetID(owner)
 	_ = srv.Send(ctx, ownerConnID(ctx, srv, owner), hdr, payload)
 }
 
-func (h *VarStoreHandler) sendNotifyRevoke(ctx context.Context, owner uint32, name string) {
-	if owner == 0 || name == "" {
+func (h *VarStoreHandler) sendNotifyRevoke(ctx context.Context, actor uint32, owner uint32, name string) {
+	if actor == 0 || owner == 0 || name == "" {
 		return
 	}
 	srv := core.ServerFromContext(ctx)
@@ -1445,7 +1727,7 @@ func (h *VarStoreHandler) sendNotifyRevoke(ctx context.Context, owner uint32, na
 	hdr := (&header.HeaderTcp{}).
 		WithMajor(header.MajorCmd).
 		WithSubProto(3).
-		WithSourceID(srv.NodeID()).
+		WithSourceID(actor).
 		WithTargetID(owner)
 	_ = srv.Send(ctx, ownerConnID(ctx, srv, owner), hdr, payload)
 }
