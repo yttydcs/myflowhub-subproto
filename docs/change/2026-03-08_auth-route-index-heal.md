@@ -4,6 +4,8 @@
 
 近期在多 hop 场景出现回归：Root Hub 因 `sourceMismatch` 丢弃后代节点帧，导致上层子协议（典型是 VarStore `list/get`）返回 `not found (code=4)`。
 
+改动规模：较大（触及 Auth 信任与路由索引自愈关键链路，影响多 hop 场景稳定性与安全门禁）。
+
 典型日志（Root 侧）：
 
 ```
@@ -82,4 +84,3 @@ GOWORK=off go list -m github.com/yttydcs/myflowhub-subproto/auth@v0.1.2
 ## 回滚方案
 - Server 侧回退依赖到 `github.com/yttydcs/myflowhub-subproto/auth v0.1.1`；
 - 或发布后续 patch（`auth/v0.1.3`）修正。
-
