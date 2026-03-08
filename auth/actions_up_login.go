@@ -39,15 +39,44 @@ func (h *LoginHandler) handleUpLogin(ctx context.Context, conn core.IConnection,
 	if strings.TrimSpace(req.SenderSig) == "" || !strings.EqualFold(strings.TrimSpace(req.SenderAlg), defaultAlgES256) || req.SenderID == 0 {
 		return
 	}
-	senderPub := h.lookupTrustedNodePub(req.SenderID, conn)
-	if senderPub == nil && strings.TrimSpace(req.SenderPub) != "" {
-		if pub, raw, err := parseECPubKey(req.SenderPub); err == nil {
-			senderPub = pub
-			h.addTrustedNode(req.SenderID, req.SenderPub)
-			conn.SetMeta("node_pubkey", raw)
-		}
+	if conn == nil || hdr == nil {
+		return
 	}
-	if senderPub == nil || !verifyEcdsaSig(senderPub, upLoginSenderSignBytes(req), req.SenderSig) {
+	hdrSource := hdr.SourceID()
+	if hdrSource == 0 || req.SenderID != hdrSource {
+		return
+	}
+	// 约束：up_login 的 sender 必须为当前连接已登录的对端节点；
+	// sender_pub 的学习/自愈也仅在该约束下允许，避免伪造/污染 trusted。
+	if meta, ok := conn.GetMeta("nodeID"); !ok {
+		return
+	} else if nid, ok2 := meta.(uint32); !ok2 || nid == 0 || nid != hdrSource {
+		return
+	}
+
+	senderPub := h.lookupTrustedNodePub(req.SenderID, conn)
+	senderVerified := senderPub != nil && verifyEcdsaSig(senderPub, upLoginSenderSignBytes(req), req.SenderSig)
+	if !senderVerified {
+		candB64 := strings.TrimSpace(req.SenderPub)
+		if candB64 == "" {
+			return
+		}
+		candPub, candRaw, err := parseECPubKey(candB64)
+		if err != nil || candPub == nil || len(candRaw) == 0 {
+			return
+		}
+		if !verifyEcdsaSig(candPub, upLoginSenderSignBytes(req), req.SenderSig) {
+			return
+		}
+		trustedUpdated, bindingUpdated := h.upsertTrustedAndBindingPubKey(req.SenderID, candRaw)
+		conn.SetMeta("node_pubkey", candRaw)
+		if (trustedUpdated || bindingUpdated) && senderPub != nil && h.log != nil {
+			h.log.Warn("healed sender pubkey from up_login", "sender_id", req.SenderID, "conn", conn.ID(), "trusted_updated", trustedUpdated, "binding_updated", bindingUpdated)
+		}
+		senderPub = candPub
+		senderVerified = true
+	}
+	if senderPub == nil || !senderVerified {
 		return
 	}
 	// 检查路由冲突

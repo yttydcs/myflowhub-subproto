@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 
 	core "github.com/yttydcs/myflowhub-core"
@@ -116,8 +117,41 @@ func (h *LoginHandler) sourceMatches(conn core.IConnection, hdr core.IHeader) bo
 	return hdr.SourceID() == nid
 }
 
+func (h *LoginHandler) upsertTrustedAndBindingPubKey(nodeID uint32, pubKey []byte) (trustedUpdated, bindingUpdated bool) {
+	if nodeID == 0 || len(pubKey) == 0 || h == nil {
+		return false, false
+	}
+	h.mu.Lock()
+	if h.trustedNode == nil {
+		h.trustedNode = make(map[uint32][]byte)
+	}
+	if existing, ok := h.trustedNode[nodeID]; !ok || !bytes.Equal(existing, pubKey) {
+		h.trustedNode[nodeID] = cloneSlice(pubKey)
+		trustedUpdated = true
+	}
+	for dev, rec := range h.whitelist {
+		if rec.NodeID != nodeID {
+			continue
+		}
+		if bytes.Equal(rec.PubKey, pubKey) {
+			continue
+		}
+		rec.PubKey = cloneSlice(pubKey)
+		h.whitelist[dev] = rec
+		bindingUpdated = true
+	}
+	h.mu.Unlock()
+	if trustedUpdated || bindingUpdated {
+		h.persistState()
+	}
+	return trustedUpdated, bindingUpdated
+}
+
 // persistState 持久化 whitelist 与 trustedNode。
 func (h *LoginHandler) persistState() {
+	if h.disablePersist {
+		return
+	}
 	h.mu.RLock()
 	bindings := make(map[string]bindingRecord, len(h.whitelist))
 	for dev, rec := range h.whitelist {

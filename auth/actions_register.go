@@ -36,9 +36,6 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 		send(ctx, conn, hdr, actionRegisterResp, respData{Code: 400, Msg: "invalid register data"})
 		return
 	}
-	if strings.TrimSpace(req.PubKey) == "" && strings.TrimSpace(h.nodePubB64) != "" {
-		req.PubKey = h.nodePubB64
-	}
 	req.NodePub = req.PubKey
 	var pubRaw []byte
 	if strings.TrimSpace(req.PubKey) != "" {
