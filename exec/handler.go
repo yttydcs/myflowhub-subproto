@@ -165,7 +165,7 @@ func (h *Handler) handleCall(ctx context.Context, conn core.IConnection, hdr cor
 	// 来自父节点：下游无条件信任父节点，不做权限判定，直接按最终 target 转交/执行。
 	if isParentConn(conn) {
 		if req.TargetNode == local {
-			h.execLocal(ctx, req)
+			h.execLocal(ctx, hdr, req)
 			return
 		}
 		h.forwardDownOrDrop(ctx, srv, hdr, payloadFrom(message{Action: actionCall, Data: mustJSON(req)}), req.TargetNode)
@@ -178,7 +178,7 @@ func (h *Handler) handleCall(ctx context.Context, conn core.IConnection, hdr cor
 			h.sendCallResp(ctx, hdr, CallResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", ExecutorNode: req.ExecutorNode, TargetNode: req.TargetNode, Method: req.Method})
 			return
 		}
-		h.execLocal(ctx, req)
+		h.execLocal(ctx, hdr, req)
 		return
 	}
 
@@ -247,7 +247,7 @@ func (h *Handler) handleCallResp(_ context.Context, _ core.IConnection, _ core.I
 	broker.SharedExecCallBroker().Deliver(resp.ReqID, resp)
 }
 
-func (h *Handler) execLocal(ctx context.Context, req CallReq) {
+func (h *Handler) execLocal(ctx context.Context, reqHdr core.IHeader, req CallReq) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
 		return
@@ -262,7 +262,7 @@ func (h *Handler) execLocal(ctx context.Context, req CallReq) {
 
 	fn, ok := h.methods[req.Method]
 	if !ok || fn == nil {
-		h.sendCallRespToNode(ctx, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: 404, Msg: "method not found", ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method})
+		h.sendCallRespToNode(ctx, reqHdr, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: 404, Msg: "method not found", ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method})
 		return
 	}
 	res, err := fn(callCtx, req.Args)
@@ -271,10 +271,10 @@ func (h *Handler) execLocal(ctx context.Context, req CallReq) {
 		if callCtx.Err() == context.DeadlineExceeded {
 			code = 408
 		}
-		h.sendCallRespToNode(ctx, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: code, Msg: err.Error(), ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method})
+		h.sendCallRespToNode(ctx, reqHdr, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: code, Msg: err.Error(), ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method})
 		return
 	}
-	h.sendCallRespToNode(ctx, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method, Result: res})
+	h.sendCallRespToNode(ctx, reqHdr, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method, Result: res})
 }
 
 func (h *Handler) sendCallResp(ctx context.Context, reqHdr core.IHeader, resp CallResp) {
@@ -286,10 +286,10 @@ func (h *Handler) sendCallResp(ctx context.Context, reqHdr core.IHeader, resp Ca
 	if executor == 0 {
 		return
 	}
-	h.sendCallRespToNode(ctx, executor, resp)
+	h.sendCallRespToNode(ctx, reqHdr, executor, resp)
 }
 
-func (h *Handler) sendCallRespToNode(ctx context.Context, target uint32, resp CallResp) {
+func (h *Handler) sendCallRespToNode(ctx context.Context, reqHdr core.IHeader, target uint32, resp CallResp) {
 	if target == 0 {
 		return
 	}
@@ -303,6 +303,14 @@ func (h *Handler) sendCallRespToNode(ctx context.Context, target uint32, resp Ca
 		WithSubProto(SubProtoExec).
 		WithSourceID(srv.NodeID()).
 		WithTargetID(target)
+	if reqHdr != nil {
+		if msgID := reqHdr.GetMsgID(); msgID != 0 {
+			hdr = hdr.WithMsgID(msgID)
+		}
+		if traceID := reqHdr.GetTraceID(); traceID != 0 {
+			hdr = hdr.WithTraceID(traceID)
+		}
+	}
 
 	// 逐跳选择下一跳连接：先命中子树，否则上送父节点
 	var next core.IConnection

@@ -1,0 +1,127 @@
+package exec
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"testing"
+
+	core "github.com/yttydcs/myflowhub-core"
+	"github.com/yttydcs/myflowhub-core/connmgr"
+	"github.com/yttydcs/myflowhub-core/eventbus"
+	"github.com/yttydcs/myflowhub-core/header"
+)
+
+type mockAddr struct{}
+
+func (mockAddr) Network() string { return "tcp" }
+func (mockAddr) String() string  { return "127.0.0.1:0" }
+
+type mockConnection struct {
+	id   string
+	meta map[string]any
+}
+
+var _ core.IConnection = (*mockConnection)(nil)
+
+func (m *mockConnection) ID() string                    { return m.id }
+func (m *mockConnection) Close() error                  { return nil }
+func (m *mockConnection) OnReceive(core.ReceiveHandler) {}
+func (m *mockConnection) SetMeta(k string, v any) {
+	if m.meta == nil {
+		m.meta = make(map[string]any)
+	}
+	m.meta[k] = v
+}
+func (m *mockConnection) GetMeta(k string) (any, bool) {
+	if m.meta == nil {
+		return nil, false
+	}
+	v, ok := m.meta[k]
+	return v, ok
+}
+func (m *mockConnection) Metadata() map[string]any                                     { return m.meta }
+func (m *mockConnection) LocalAddr() net.Addr                                          { return mockAddr{} }
+func (m *mockConnection) RemoteAddr() net.Addr                                         { return mockAddr{} }
+func (m *mockConnection) Reader() core.IReader                                         { return nil }
+func (m *mockConnection) SetReader(core.IReader)                                       {}
+func (m *mockConnection) DispatchReceive(core.IHeader, []byte)                         {}
+func (m *mockConnection) RawConn() net.Conn                                            { return nil }
+func (m *mockConnection) Send([]byte) error                                            { return nil }
+func (m *mockConnection) SendWithHeader(core.IHeader, []byte, core.IHeaderCodec) error { return nil }
+
+type sentFrame struct {
+	connID  string
+	hdr     core.IHeader
+	payload []byte
+}
+
+type testServer struct {
+	nodeID uint32
+	cm     core.IConnectionManager
+	sends  []sentFrame
+}
+
+var _ core.IServer = (*testServer)(nil)
+
+func (s *testServer) Start(context.Context) error { return nil }
+func (s *testServer) Stop(context.Context) error  { return nil }
+
+func (s *testServer) Config() core.IConfig                 { return nil }
+func (s *testServer) ConnManager() core.IConnectionManager { return s.cm }
+func (s *testServer) Process() core.IProcess               { return nil }
+func (s *testServer) HeaderCodec() core.IHeaderCodec       { return nil }
+func (s *testServer) NodeID() uint32                       { return s.nodeID }
+func (s *testServer) UpdateNodeID(id uint32)               { s.nodeID = id }
+func (s *testServer) EventBus() eventbus.IBus              { return nil }
+func (s *testServer) Send(_ context.Context, connID string, hdr core.IHeader, payload []byte) error {
+	cloneHdr := hdr
+	if hdr != nil {
+		cloneHdr = hdr.Clone()
+	}
+	cp := append([]byte(nil), payload...)
+	s.sends = append(s.sends, sentFrame{connID: connID, hdr: cloneHdr, payload: cp})
+	return nil
+}
+
+func TestExecCallResp_InheritsMsgIDTraceID(t *testing.T) {
+	cm := connmgr.New()
+	srv := &testServer{nodeID: 1, cm: cm}
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	conn := &mockConnection{id: "c1"}
+	conn.SetMeta("nodeID", uint32(2))
+	if err := cm.Add(conn); err != nil {
+		t.Fatalf("add conn err=%v", err)
+	}
+
+	reqHdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(SubProtoExec).
+		WithSourceID(2).
+		WithTargetID(1).
+		WithMsgID(111).
+		WithTraceID(222)
+
+	h := NewHandler(nil)
+	raw, _ := json.Marshal(CallReq{
+		ReqID:        "r1",
+		ExecutorNode: 2,
+		TargetNode:   1,
+		Method:       "debug::echo",
+		Args:         json.RawMessage(`{"x":1}`),
+		TimeoutMs:    1000,
+	})
+	h.handleCall(ctx, conn, reqHdr, raw)
+
+	if len(srv.sends) != 1 {
+		t.Fatalf("expected 1 send, got %d", len(srv.sends))
+	}
+	got := srv.sends[0].hdr
+	if got.GetMsgID() != 111 || got.GetTraceID() != 222 {
+		t.Fatalf("expected msg_id=111 trace_id=222, got msg_id=%d trace_id=%d", got.GetMsgID(), got.GetTraceID())
+	}
+	if got.Major() != header.MajorOKResp || got.SubProto() != SubProtoExec || got.SourceID() != 1 || got.TargetID() != 2 {
+		t.Fatalf("unexpected hdr: major=%d sub=%d src=%d tgt=%d", got.Major(), got.SubProto(), got.SourceID(), got.TargetID())
+	}
+}

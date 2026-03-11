@@ -20,8 +20,8 @@ import (
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
 
-	"github.com/yttydcs/myflowhub-subproto/broker"
 	protocolexec "github.com/yttydcs/myflowhub-proto/protocol/exec"
+	"github.com/yttydcs/myflowhub-subproto/broker"
 )
 
 type LocalMethodFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
@@ -237,11 +237,11 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 	// 来自父节点：下游无条件信任父节点，视为已授权，直接将请求转交到 executor（或本地落盘）。
 	if isParentConn(conn) {
 		if executor == local {
-			h.applySetLocal(ctx, req, origin)
+			h.applySetLocal(ctx, hdr, req, origin)
 			return
 		}
 		if !h.forwardDown(ctx, srv, hdr, message{Action: actionSet, Data: mustJSON(req)}, executor) {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "forward failed", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "forward failed", FlowID: req.FlowID})
 		}
 		return
 	}
@@ -249,10 +249,10 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 	// executor 为本节点：本节点即 LCA+executor，执行权限判定并落盘生效。
 	if executor == local {
 		if !h.hasPermission(origin, permFlowSet) {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", FlowID: req.FlowID})
 			return
 		}
-		h.applySetLocal(ctx, req, origin)
+		h.applySetLocal(ctx, hdr, req, origin)
 		return
 	}
 
@@ -262,18 +262,18 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 		// 不在本子树：上送父节点（若无父则 not found）
 		parent := findParentConn(cm)
 		if parent == nil {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: req.FlowID})
 			return
 		}
 		parentNode := connNodeID(parent)
 		if parentNode == 0 {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "invalid parent route", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "invalid parent route", FlowID: req.FlowID})
 			return
 		}
 		// 上送必须让父节点进入 handler：TargetID=父节点自身
 		upHdr, ok := header.CloneToTCPForForward(hdr)
 		if !ok {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
 			return
 		}
 		upHdr.WithTargetID(parentNode)
@@ -286,12 +286,12 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 	if ok2 && originConn != nil && originConn.ID() == execConn.ID() {
 		nextNode := connNodeID(originConn)
 		if nextNode == 0 {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "invalid route", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "invalid route", FlowID: req.FlowID})
 			return
 		}
 		childHdr, ok := header.CloneToTCPForForward(hdr)
 		if !ok {
-			h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
+			h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
 			return
 		}
 		childHdr.WithTargetID(nextNode)
@@ -301,21 +301,21 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 
 	// 本节点为 LCA：判定权限后，向下转发到 executor（转发即同意）。
 	if !h.hasPermission(origin, permFlowSet) {
-		h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", FlowID: req.FlowID})
+		h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", FlowID: req.FlowID})
 		return
 	}
 	downHdr, ok := header.CloneToTCPForForward(hdr)
 	if !ok {
-		h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
+		h.sendSetRespToNode(ctx, hdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
 		return
 	}
 	downHdr.WithTargetID(executor)
 	h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
 }
 
-func (h *Handler) applySetLocal(ctx context.Context, req setReq, origin uint32) {
+func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req setReq, origin uint32) {
 	if err := validateGraph(req.Graph); err != nil {
-		h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
+		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
 		return
 	}
 	h.mu.Lock()
@@ -324,17 +324,17 @@ func (h *Handler) applySetLocal(ctx context.Context, req setReq, origin uint32) 
 	h.mu.Unlock()
 
 	if err := os.MkdirAll(base, 0o755); err != nil {
-		h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "mkdir failed", FlowID: req.FlowID})
+		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "mkdir failed", FlowID: req.FlowID})
 		return
 	}
 	path := filepath.Join(base, req.FlowID+".json")
 	raw, _ := json.MarshalIndent(req, "", "  ")
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
-		h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "write failed", FlowID: req.FlowID})
+		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "write failed", FlowID: req.FlowID})
 		return
 	}
 	h.restartScheduler(req.FlowID)
-	h.sendSetRespToNode(ctx, origin, setResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID})
+	h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID})
 }
 
 func (h *Handler) handleRun(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
@@ -661,7 +661,7 @@ func (h *Handler) sendListResp(ctx context.Context, hdr core.IHeader, resp listR
 	if target == 0 {
 		return
 	}
-	h.sendCtrlToNode(ctx, target, message{Action: actionListResp, Data: mustJSON(resp)})
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionListResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendGetResp(ctx context.Context, hdr core.IHeader, resp getResp) {
@@ -672,7 +672,7 @@ func (h *Handler) sendGetResp(ctx context.Context, hdr core.IHeader, resp getRes
 	if target == 0 {
 		return
 	}
-	h.sendCtrlToNode(ctx, target, message{Action: actionGetResp, Data: mustJSON(resp)})
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionGetResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) getServer(ctx context.Context) core.IServer {
@@ -903,11 +903,11 @@ func (h *Handler) sendSetResp(ctx context.Context, hdr core.IHeader, code int, m
 	if target == 0 {
 		return
 	}
-	h.sendSetRespToNode(ctx, target, setResp{ReqID: "", Code: code, Msg: msg, FlowID: flowID})
+	h.sendSetRespToNode(ctx, hdr, target, setResp{ReqID: "", Code: code, Msg: msg, FlowID: flowID})
 }
 
-func (h *Handler) sendSetRespToNode(ctx context.Context, target uint32, resp setResp) {
-	h.sendCtrlToNode(ctx, target, message{Action: actionSetResp, Data: mustJSON(resp)})
+func (h *Handler) sendSetRespToNode(ctx context.Context, reqHdr core.IHeader, target uint32, resp setResp) {
+	h.sendCtrlToNodeWithReqHdr(ctx, reqHdr, target, message{Action: actionSetResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendRunResp(ctx context.Context, hdr core.IHeader, resp runResp) {
@@ -918,7 +918,7 @@ func (h *Handler) sendRunResp(ctx context.Context, hdr core.IHeader, resp runRes
 	if target == 0 {
 		return
 	}
-	h.sendCtrlToNode(ctx, target, message{Action: actionRunResp, Data: mustJSON(resp)})
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionRunResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendStatusResp(ctx context.Context, hdr core.IHeader, resp statusResp) {
@@ -929,10 +929,14 @@ func (h *Handler) sendStatusResp(ctx context.Context, hdr core.IHeader, resp sta
 	if target == 0 {
 		return
 	}
-	h.sendCtrlToNode(ctx, target, message{Action: actionStatusResp, Data: mustJSON(resp)})
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionStatusResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendCtrlToNode(ctx context.Context, target uint32, msg message) {
+	h.sendCtrlToNodeWithReqHdr(ctx, nil, target, msg)
+}
+
+func (h *Handler) sendCtrlToNodeWithReqHdr(ctx context.Context, reqHdr core.IHeader, target uint32, msg message) {
 	if target == 0 {
 		return
 	}
@@ -948,6 +952,14 @@ func (h *Handler) sendCtrlToNode(ctx context.Context, target uint32, msg message
 		WithSubProto(SubProtoFlow).
 		WithSourceID(src).
 		WithTargetID(target)
+	if reqHdr != nil {
+		if msgID := reqHdr.GetMsgID(); msgID != 0 {
+			hdr = hdr.WithMsgID(msgID)
+		}
+		if traceID := reqHdr.GetTraceID(); traceID != 0 {
+			hdr = hdr.WithTraceID(traceID)
+		}
+	}
 
 	// 逐跳选择下一跳连接：先命中子树，否则上送父节点
 	var next core.IConnection

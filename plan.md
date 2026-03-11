@@ -1,70 +1,58 @@
-# Plan - MyFlowHub-SubProto/auth：修复 UpLogin sender 公钥毒化与路由自愈
+# Plan - MyFlowHub-SubProto：修复 Flow/Exec 响应 MsgID，解除 Win Await 超时
 
 ## Workflow 信息
 - Repo：`MyFlowHub-SubProto`
-- 分支：`fix/auth-route-index-heal`
-- Worktree：`d:\project\MyFlowHub3\worktrees\fix-auth-route-index-heal\MyFlowHub-SubProto`
+- 分支：`fix/resp-msgid`
+- Worktree：`d:\project\MyFlowHub3\worktrees\fix-subproto-resp-msgid`
 - Base：`main`
-- 关联仓库：`MyFlowHub-Server`（升级依赖并发布 HubServer）
+- 关联仓库（本轮不改代码）：
+  - `MyFlowHub-Server`：`scripts/run-dev.ps1` 启动的 `hub_server` 会依赖 `myflowhub-subproto/flow|exec`
+  - `MyFlowHub-Win`：Flow 页面通过 SDK `SendAndAwait` 等待 `*_resp`
+  - `MyFlowHub-SDK`：Await 按 `MsgID + SubProto + Action` 匹配响应
 
 ## 项目目标与当前状态
-- 目标：修复多 hop 场景中 Root Hub 因 `sourceMismatch` 丢弃后代节点帧的问题（典型日志：`drop frame due to source mismatch subproto=3 hdr_source=11 meta_node=9`），确保能建立 `nodeIndex[descendant] -> childConn`。
-- 当前状态：根因已确认：`register` 在 `pubkey` 缺失时填本机公钥导致 trusted/binding “毒化”，进而 `up_login` sender 验签失败、无法写入路由索引。
-- 已确认约束：不放宽 Core `sourceMismatch` 门禁；`up_login` 允许自愈但必须满足 `req.SenderID == hdr.SourceID == conn.meta(nodeID)`。
-- 明确不做：父链 bootstrap register 携带 pubkey（本轮不做方向 3）。
+- 目标：在 Win 的 Flow 页面中，`Refresh / Save / Run / Status / Get` 不再出现 `request timed out`；响应能够被 SDK await 正确匹配并返回给 UI。
+- 当前状态（已复现）：Win Logs 能看到 `[RX] ... payload={"action":"list_resp",...}`，但仍超时；根因是响应 Header 的 `msg_id` 未回写请求的 `msg_id`，SDK await 无法 deliver。
+- 明确不做：不改 wire（action 名称/JSON schema/SubProto 编号不变），不改权限模型，仅修复响应头部字段。
 
-## 依赖关系
-- Auth 模块需要发布新 tag：`auth/v0.1.2`。
-- Server 侧需在 `go.mod` 升级 `github.com/yttydcs/myflowhub-subproto/auth` 到新版本，并发布新 Server 版本（是否打 `myflowhub-server` tag 由后续确认）。
-
-## 风险与注意事项
-- 安全：自愈属于“纠正历史错误 trusted key”，必须严格约束触发条件并记录审计日志；不满足条件保持拒绝（返回）。
-- 持久化：仅更新 `trustedNode` 不够，必须同步修正 `whitelist(binding).PubKey`，否则落盘仍可能写回旧错误 key。
-- 测试隔离：`auth.disable_persist=true` 按文档语义应禁止读写 `config/trusted_nodes.json`（需要确认实现一致，避免测试污染）。
+## 关键约束与设计原则
+- SDK await 匹配键为 `MsgID + SubProto + Action`，响应必须带回请求的 `MsgID`。
+- handler 可能在 `AcceptCmd()` 场景“拦截处理非本地 Target”的 Cmd 帧；因此响应头需要：
+  - 保留请求的 `MsgID/TraceID`（用于 await/链路追踪）；
+  - `SourceID` 必须是当前发送响应的节点（`srv.NodeID()`）；
+  - `TargetID` 必须是实际回包目标节点（通常为请求发起方/`origin_node`）。
 
 ## 可执行任务清单（Checklist）
 
-### AUTH-1 修复 register：缺省 pubkey 不再填本机公钥
-- 目标：当 register 请求未携带 `pubkey` 时，保持空值，不写 trusted/binding 公钥，避免把 Root 节点公钥错误写入子节点记录。
-- 涉及模块/文件：`auth/actions_register.go`
-- 验收条件：
-  - `pubkey` 为空时不再触发 `addTrustedNode(...)`；
-  - 仍可正常分配/绑定 node_id 与 device_id。
-- 测试点：新增/更新单测覆盖 `pubkey` 缺失时的行为（不写 trusted）。
-- 回滚点：回退本次改动提交。
+### RESP-1 修复 flow：所有 `*_resp` 回包带回请求 MsgID
+- 目标：`set_resp/run_resp/status_resp/list_resp/get_resp` 的 header.MsgID == request header.MsgID。
+- 涉及模块/文件：`flow/handler.go`
+- 验收条件：Win Flow `Refresh` 不超时；日志不再出现 `flow list await failed: context deadline exceeded`。
+- 测试点：新增单测覆盖 `list_resp` 的 MsgID 回写；并回归 `go test ./...`（flow module）。
+- 回滚点：回退本任务提交。
 
-### AUTH-2 修复 up_login：trusted sender 验签失败时允许 SenderPub 自愈（受限）
-- 目标：当 `lookupTrustedNodePub(senderID)` 返回的 pub 验签失败时，若请求携带 `sender_pub` 且满足约束（SenderID/SourceID/conn.meta 一致），则使用 `sender_pub` 二次验签，通过则更新 trusted + 修正对应 binding/pubkey 并继续写入路由索引。
-- 涉及模块/文件：
-  - `auth/actions_up_login.go`
-  - `auth/session.go`（如需暴露/复用“更新 binding 公钥并持久化”的 helper）
-- 验收条件：
-  - 发生自愈后仍能执行 `AddNodeIndex(req.NodeID, conn)`；
-  - 自愈会输出 WARN 审计日志（至少包含 sender_id、conn id、以及“发生自愈/更新”）；
-  - 不满足约束或验签失败时不更新 trusted/binding。
-- 测试点：
-  - trusted 正确：正常通过；
-  - trusted 错误 + sender_pub 正确：触发自愈并通过；
-  - `req.SenderID != hdr.SourceID`：即使 sender_pub 可验也不得自愈。
-- 回滚点：回退本次改动提交。
+### RESP-2 修复 exec：`call_resp` 回包带回请求 MsgID
+- 目标：`call_resp` 的 header.MsgID == request header.MsgID（便于未来客户端对 `exec.call` 使用 await）。
+- 涉及模块/文件：`exec/handler.go`
+- 验收条件：单测通过；不引入行为差异（权限/转发逻辑不变）。
+- 测试点：新增单测覆盖 `call_resp` 的 MsgID 回写；并回归 `go test ./...`（exec module）。
+- 回滚点：回退本任务提交。
 
-### AUTH-3 修复/对齐 disable_persist 语义（测试与文档一致性）
-- 目标：当配置 `auth.disable_persist=true` 时，不读写 `config/trusted_nodes.json`（与 Server 文档一致）。
-- 涉及模块/文件：`auth/session.go`、`auth/node_keys.go`（如需）
-- 验收条件：单测运行不会在工作目录产生 `config/trusted_nodes.json` 副作用；运行期关闭持久化时不落盘。
-- 测试点：单测中显式设置 `auth.disable_persist=true` 并断言无文件产生（或通过 tempdir 隔离验证）。
-- 回滚点：回退该语义对齐提交（若评估为影响面过大，可改为仅测试隔离方案）。
+### RESP-3 开发联调：让 run-dev 的 hub_server 使用本 worktree 的 flow/exec 模块
+- 目标：本地 `go run ./cmd/hub_server` 能引用本 worktree 的 `myflowhub-subproto/flow|exec`，从而验证 Win UI 不再超时。
+- 涉及模块/文件：`d:\project\MyFlowHub3\go.work`
+- 验收条件：`scripts/run-dev.ps1` 启动后 Win → Flow → Refresh 正常返回。
+- 回滚点：从 `go.work` 移除本 worktree 的 `use` 条目。
 
-### AUTH-4 回归测试：覆盖“毒化 trusted -> 自愈 -> 建路由”关键链路
-- 目标：新增针对 `handleUpLogin` 的回归用例，模拟“sender trusted key 错误但 sender_pub 正确”的场景，确保能够更新 trusted/binding 并写入 `ConnManager.nodeIndex`。
-- 涉及模块/文件：`auth/actions_up_login_test.go`（或新增专用 test 文件）
-- 验收条件：`cd auth && GOWORK=off go test ./... -count=1 -p 1` 通过。
-- 测试点：同 AUTH-2。
-- 回滚点：回退新增测试文件/用例。
+## 验证步骤（可交接执行）
+1) 代码层：
+   - `cd d:\project\MyFlowHub3\worktrees\fix-subproto-resp-msgid\flow && go test ./... -count=1 -p 1`
+   - `cd d:\project\MyFlowHub3\worktrees\fix-subproto-resp-msgid\exec && go test ./... -count=1 -p 1`
+2) 联调：
+   - `d:\project\MyFlowHub3\scripts\run-dev.ps1 -WaitServer`
+   - Win → Home：Connect + Login（确保有 node_id）
+   - Win → Flow：Executor 填 `1`，点 `Refresh`，期望立即返回（不超时）；再试 `Save/Run/Status`。
 
-### AUTH-5 发布：打 tag 并交付给 Server 升级依赖
-- 目标：合并前在本仓创建并推送 `auth/v0.1.2`，供 Server 与下游依赖升级。
-- 涉及模块/文件：无（git tag）
-- 验收条件：`git tag auth/v0.1.2` 存在且可被 `go list -m` 解析。
-- 测试点：Server 侧 `go get github.com/yttydcs/myflowhub-subproto/auth@v0.1.2` 可成功。
-- 回滚点：删除本地 tag（未推送前）或创建新 patch tag（已推送后不重写）。
+## 风险与注意事项
+- 若 `origin_node` 与 `hdr.SourceID` 可能不一致，响应 `TargetID` 仍必须遵循现有语义（以当前实现的 `target` 入参为准），但 `MsgID` 必须来自当前收到的请求头。
+- 改动涉及回包 header，需确保不破坏 Core 的快速转发（`MajorOKResp + TargetID` 路由）。
