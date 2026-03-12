@@ -1,5 +1,7 @@
 # SubProto：适配 Core Pipe 抽象（仅更新测试 stub/mock，不改子协议语义）
 
+> **重大变更（因依赖 Core Breaking Change）**：本次仅更新测试代码以适配 `core.IConnection.Pipe()`；若以 `GOWORK=off` 运行单测，需要升级 Core 版本（建议 `v0.3.0`）。
+
 ## 变更背景 / 目标
 现状（变更前）：
 - SubProto 业务代码通常只依赖 `core.IConnection` 能力，不关心承载。
@@ -32,4 +34,3 @@
 
 ## 回滚方案
 - 回滚本次提交（或整体 revert），并同步回滚 Core 的 `IConnection` 变更（恢复 `RawConn()`）。
-
