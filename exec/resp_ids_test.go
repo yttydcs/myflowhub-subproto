@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"testing"
 
@@ -17,6 +18,12 @@ type mockAddr struct{}
 func (mockAddr) Network() string { return "tcp" }
 func (mockAddr) String() string  { return "127.0.0.1:0" }
 
+type nopPipe struct{}
+
+func (nopPipe) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopPipe) Write(p []byte) (int, error) { return len(p), nil }
+func (nopPipe) Close() error                { return nil }
+
 type mockConnection struct {
 	id   string
 	meta map[string]any
@@ -25,6 +32,7 @@ type mockConnection struct {
 var _ core.IConnection = (*mockConnection)(nil)
 
 func (m *mockConnection) ID() string                    { return m.id }
+func (m *mockConnection) Pipe() core.IPipe              { return nopPipe{} }
 func (m *mockConnection) Close() error                  { return nil }
 func (m *mockConnection) OnReceive(core.ReceiveHandler) {}
 func (m *mockConnection) SetMeta(k string, v any) {
@@ -46,7 +54,6 @@ func (m *mockConnection) RemoteAddr() net.Addr                                  
 func (m *mockConnection) Reader() core.IReader                                         { return nil }
 func (m *mockConnection) SetReader(core.IReader)                                       {}
 func (m *mockConnection) DispatchReceive(core.IHeader, []byte)                         {}
-func (m *mockConnection) RawConn() net.Conn                                            { return nil }
 func (m *mockConnection) Send([]byte) error                                            { return nil }
 func (m *mockConnection) SendWithHeader(core.IHeader, []byte, core.IHeaderCodec) error { return nil }
 
