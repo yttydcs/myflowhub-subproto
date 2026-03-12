@@ -1,11 +1,18 @@
 package management
 
 import (
+	"io"
 	"net"
 	"testing"
 
 	core "github.com/yttydcs/myflowhub-core"
 )
+
+type nopPipe struct{}
+
+func (nopPipe) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopPipe) Write(p []byte) (int, error) { return len(p), nil }
+func (nopPipe) Close() error                { return nil }
 
 type stubConn struct {
 	id   string
@@ -21,6 +28,8 @@ func (c *stubConn) Send([]byte) error { return nil }
 func (c *stubConn) SendWithHeader(core.IHeader, []byte, core.IHeaderCodec) error { return nil }
 
 func (c *stubConn) ID() string { return c.id }
+
+func (c *stubConn) Pipe() core.IPipe { return nopPipe{} }
 
 func (c *stubConn) Close() error { return nil }
 
@@ -45,8 +54,6 @@ func (c *stubConn) Reader() core.IReader { return nil }
 func (c *stubConn) SetReader(core.IReader) {}
 
 func (c *stubConn) DispatchReceive(core.IHeader, []byte) {}
-
-func (c *stubConn) RawConn() net.Conn { return nil }
 
 type stubConnManager struct {
 	conns []core.IConnection

@@ -3,6 +3,7 @@ package varstore
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"testing"
 
@@ -17,6 +18,12 @@ type testAddr struct{}
 
 func (testAddr) Network() string { return "test" }
 func (testAddr) String() string  { return "test" }
+
+type nopPipe struct{}
+
+func (nopPipe) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopPipe) Write(p []byte) (int, error) { return len(p), nil }
+func (nopPipe) Close() error                { return nil }
 
 type testConn struct {
 	id   string
@@ -37,6 +44,7 @@ func newTestConn(id string) *testConn {
 }
 
 func (c *testConn) ID() string                           { return c.id }
+func (c *testConn) Pipe() core.IPipe                     { return nopPipe{} }
 func (c *testConn) Close() error                         { return nil }
 func (c *testConn) OnReceive(core.ReceiveHandler)        {}
 func (c *testConn) SetMeta(key string, val any)          { c.meta[key] = val }
@@ -47,7 +55,6 @@ func (c *testConn) RemoteAddr() net.Addr                 { return testAddr{} }
 func (c *testConn) Reader() core.IReader                 { return nil }
 func (c *testConn) SetReader(core.IReader)               {}
 func (c *testConn) DispatchReceive(core.IHeader, []byte) {}
-func (c *testConn) RawConn() net.Conn                    { return nil }
 func (c *testConn) Send(data []byte) error {
 	c.sent = append(c.sent, testFrame{payload: data})
 	return nil
