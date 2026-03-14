@@ -1,5 +1,5 @@
-github.com/yttydcs/myflowhub-core v0.3.0 h1:RraIxTEjZcYNNppajhzumO/rAzRkxzIGbcPqe929opI=
-github.com/yttydcs/myflowhub-core v0.3.0/go.mod h1:U5sA/hY648GLBdfdyRQ904pW3lwCpzWzs1YEJ9TF9G8=
+github.com/yttydcs/myflowhub-core v0.4.0 h1:DEeoS7ED9r+booyIyA3pZm4vWCR0KTwDzboXw3P/qcM=
+github.com/yttydcs/myflowhub-core v0.4.0/go.mod h1:v63nBnLGfsVLtrbnM9jeiTL+s5nWeCOJ9BWeoWtfwc8=
 github.com/yttydcs/myflowhub-proto v0.1.0 h1:AihWs9cvBK0xn8qUVn7vfzmBN/73UBiGLYKx0ubkiLU=
 github.com/yttydcs/myflowhub-proto v0.1.0/go.mod h1:1shJnnAYNZYd1KnGNtvgdygTaeCyx5duMnxrRLRouOc=
 github.com/yttydcs/myflowhub-subproto/broker v0.1.0 h1:YnNJ4kMmyl4WgL1o/1X6r54wv8Huamga1Z4yL9gkRgA=
