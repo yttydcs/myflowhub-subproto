@@ -66,6 +66,7 @@ type sentFrame struct {
 type testServer struct {
 	nodeID uint32
 	cm     core.IConnectionManager
+	bus    eventbus.IBus
 	sends  []sentFrame
 }
 
@@ -80,7 +81,7 @@ func (s *testServer) Process() core.IProcess               { return nil }
 func (s *testServer) HeaderCodec() core.IHeaderCodec       { return nil }
 func (s *testServer) NodeID() uint32                       { return s.nodeID }
 func (s *testServer) UpdateNodeID(id uint32)               { s.nodeID = id }
-func (s *testServer) EventBus() eventbus.IBus              { return nil }
+func (s *testServer) EventBus() eventbus.IBus              { return s.bus }
 func (s *testServer) Send(_ context.Context, connID string, hdr core.IHeader, payload []byte) error {
 	cloneHdr := hdr
 	if hdr != nil {

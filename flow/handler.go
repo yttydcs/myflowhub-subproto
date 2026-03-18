@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/yttydcs/myflowhub-core"
+	"github.com/yttydcs/myflowhub-core/eventbus"
 	"github.com/yttydcs/myflowhub-core/header"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
@@ -43,6 +44,7 @@ type Handler struct {
 	schedulers map[string]*flowScheduler // flow_id -> scheduler
 
 	schedStarted bool
+	eventSubOnce sync.Once
 
 	localMethods map[string]LocalMethodFunc
 }
@@ -60,6 +62,28 @@ type runState struct {
 	nodes  map[string]nodeStatus
 	start  time.Time
 	end    time.Time
+}
+
+const (
+	triggerTypeInterval   = "interval"
+	triggerTypeEvent      = "event"
+	triggerTypeVarChanged = "var_changed"
+
+	eventModePublish  = "publish"
+	eventModeReceived = "received"
+	eventModeAny      = "any"
+)
+
+type topicPublishEvent struct {
+	Topic string          `json:"topic"`
+	Name  string          `json:"name"`
+	TS    int64           `json:"ts,omitempty"`
+	Data  json.RawMessage `json:"payload,omitempty"`
+}
+
+type varChangedEvent struct {
+	Owner uint32 `json:"owner"`
+	Name  string `json:"name"`
 }
 
 func NewHandler(log *slog.Logger) *Handler {
@@ -103,6 +127,7 @@ func (h *Handler) BindServer(srv core.IServer) {
 	h.srv = srv
 	h.mu.Unlock()
 	h.startSchedulers()
+	h.ensureTriggerSubscriptions(srv)
 }
 
 // AcceptCmd 声明 Cmd 帧在 target!=local 时也需要本地处理一次（用于逐级授权/裁决）。
@@ -156,6 +181,73 @@ func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core
 	entry.Handle(ctx, conn, hdr, msg.Data)
 }
 
+func triggerType(t trigger) string {
+	return strings.ToLower(strings.TrimSpace(t.Type))
+}
+
+func normalizeTrigger(t *trigger) {
+	if t == nil {
+		return
+	}
+	t.Type = triggerType(*t)
+	t.EventMode = strings.ToLower(strings.TrimSpace(t.EventMode))
+	if t.Type == triggerTypeEvent && t.EventMode == "" {
+		t.EventMode = eventModePublish
+	}
+	t.EventName = strings.TrimSpace(t.EventName)
+	t.EventTopic = strings.TrimSpace(t.EventTopic)
+	t.VarName = strings.TrimSpace(t.VarName)
+}
+
+func normalizeEventMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", eventModePublish:
+		return eventModePublish
+	case eventModeReceived:
+		return eventModeReceived
+	case eventModeAny:
+		return eventModeAny
+	default:
+		return ""
+	}
+}
+
+func validateTrigger(t trigger) error {
+	switch triggerType(t) {
+	case triggerTypeInterval:
+		if t.EveryMs == 0 {
+			return errors.New("trigger interval every_ms required")
+		}
+		return nil
+	case triggerTypeEvent:
+		if normalizeEventMode(t.EventMode) == "" {
+			return errors.New("trigger event_mode unsupported")
+		}
+		if strings.TrimSpace(t.EventName) == "" && strings.TrimSpace(t.EventTopic) == "" {
+			return errors.New("trigger event requires event_name or event_topic")
+		}
+		return nil
+	case triggerTypeVarChanged:
+		return nil
+	default:
+		return errors.New("trigger type unsupported")
+	}
+}
+
+func decodeEventData(data any, out any) bool {
+	if data == nil || out == nil {
+		return false
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return false
+	}
+	return true
+}
+
 func (h *Handler) forwardRemoteByHeaderTarget(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) bool {
 	if hdr == nil || len(payload) == 0 {
 		return false
@@ -201,9 +293,13 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 	}
 	req.ReqID = strings.TrimSpace(req.ReqID)
 	req.FlowID = strings.TrimSpace(req.FlowID)
-	req.Trigger.Type = strings.ToLower(strings.TrimSpace(req.Trigger.Type))
-	if req.ReqID == "" || req.FlowID == "" || req.Trigger.Type != "interval" || req.Trigger.EveryMs == 0 {
+	normalizeTrigger(&req.Trigger)
+	if req.ReqID == "" || req.FlowID == "" {
 		h.sendSetResp(ctx, hdr, 400, "invalid set", req.FlowID)
+		return
+	}
+	if err := validateTrigger(req.Trigger); err != nil {
+		h.sendSetResp(ctx, hdr, 400, err.Error(), req.FlowID)
 		return
 	}
 
@@ -1157,13 +1253,124 @@ func (h *Handler) loadFlowsFromDisk() {
 		if err := json.Unmarshal(raw, &req); err != nil {
 			continue
 		}
-		if strings.TrimSpace(req.FlowID) == "" {
+		req.FlowID = strings.TrimSpace(req.FlowID)
+		normalizeTrigger(&req.Trigger)
+		if req.FlowID == "" {
+			continue
+		}
+		if validateTrigger(req.Trigger) != nil {
 			continue
 		}
 		h.mu.Lock()
 		h.flows[req.FlowID] = req
 		h.mu.Unlock()
 	}
+}
+
+func (h *Handler) ensureTriggerSubscriptions(srv core.IServer) {
+	if srv == nil {
+		return
+	}
+	h.eventSubOnce.Do(func() {
+		eb := srv.EventBus()
+		if eb == nil {
+			return
+		}
+		eb.Subscribe("topicbus.publish", func(_ context.Context, evt eventbus.Event) {
+			h.handleTopicPublishEvent(eventModePublish, evt.Data)
+		})
+		eb.Subscribe("topicbus.received", func(_ context.Context, evt eventbus.Event) {
+			h.handleTopicPublishEvent(eventModeReceived, evt.Data)
+		})
+		eb.Subscribe("varstore.changed", func(_ context.Context, evt eventbus.Event) {
+			h.handleVarChangedEvent(evt.Data)
+		})
+		eb.Subscribe("varstore.deleted", func(_ context.Context, evt eventbus.Event) {
+			h.handleVarChangedEvent(evt.Data)
+		})
+	})
+}
+
+func (h *Handler) handleTopicPublishEvent(mode string, data any) {
+	mode = normalizeEventMode(mode)
+	if mode == "" {
+		return
+	}
+	var ev topicPublishEvent
+	if !decodeEventData(data, &ev) {
+		return
+	}
+	ev.Topic = strings.TrimSpace(ev.Topic)
+	ev.Name = strings.TrimSpace(ev.Name)
+	if ev.Topic == "" && ev.Name == "" {
+		return
+	}
+	ids := h.collectTriggeredFlows(func(tr trigger) bool {
+		if triggerType(tr) != triggerTypeEvent {
+			return false
+		}
+		wantMode := normalizeEventMode(tr.EventMode)
+		if wantMode == "" {
+			return false
+		}
+		if wantMode != eventModeAny && wantMode != mode {
+			return false
+		}
+		wantTopic := strings.TrimSpace(tr.EventTopic)
+		if wantTopic != "" && wantTopic != ev.Topic {
+			return false
+		}
+		wantName := strings.TrimSpace(tr.EventName)
+		if wantName != "" && wantName != ev.Name {
+			return false
+		}
+		return true
+	})
+	for _, id := range ids {
+		h.tryStartRun(id)
+	}
+}
+
+func (h *Handler) handleVarChangedEvent(data any) {
+	var ev varChangedEvent
+	if !decodeEventData(data, &ev) {
+		return
+	}
+	ev.Name = strings.TrimSpace(ev.Name)
+	if ev.Owner == 0 || ev.Name == "" {
+		return
+	}
+	ids := h.collectTriggeredFlows(func(tr trigger) bool {
+		if triggerType(tr) != triggerTypeVarChanged {
+			return false
+		}
+		if tr.VarOwner != 0 && tr.VarOwner != ev.Owner {
+			return false
+		}
+		wantName := strings.TrimSpace(tr.VarName)
+		if wantName != "" && wantName != ev.Name {
+			return false
+		}
+		return true
+	})
+	for _, id := range ids {
+		h.tryStartRun(id)
+	}
+}
+
+func (h *Handler) collectTriggeredFlows(match func(trigger) bool) []string {
+	if match == nil {
+		return nil
+	}
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.flows))
+	for flowID, req := range h.flows {
+		if match(req.Trigger) {
+			ids = append(ids, flowID)
+		}
+	}
+	h.mu.Unlock()
+	return ids
 }
 
 func (h *Handler) startSchedulers() {
@@ -1198,14 +1405,18 @@ func (h *Handler) restartScheduler(flowID string) {
 		h.mu.Unlock()
 		return
 	}
+	if triggerType(flow.Trigger) != triggerTypeInterval {
+		h.mu.Unlock()
+		return
+	}
+	every := time.Duration(flow.Trigger.EveryMs) * time.Millisecond
+	if every <= 0 {
+		h.mu.Unlock()
+		return
+	}
 	stop := make(chan struct{})
 	h.schedulers[flowID] = &flowScheduler{stop: stop}
 	h.mu.Unlock()
-
-	every := time.Duration(flow.Trigger.EveryMs) * time.Millisecond
-	if every <= 0 {
-		return
-	}
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
@@ -1222,6 +1433,10 @@ func (h *Handler) restartScheduler(flowID string) {
 }
 
 func (h *Handler) tryStartScheduledRun(flowID string) {
+	h.tryStartRun(flowID)
+}
+
+func (h *Handler) tryStartRun(flowID string) {
 	flowID = strings.TrimSpace(flowID)
 	if flowID == "" {
 		return

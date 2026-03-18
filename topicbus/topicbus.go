@@ -129,7 +129,7 @@ func (h *TopicBusHandler) handleListSubs(ctx context.Context, conn core.IConnect
 	h.sendSimpleResp(ctx, conn, hdr, actionListSubsResp, listResp{Code: 1, Topics: topics})
 }
 
-func (h *TopicBusHandler) handlePublish(ctx context.Context, conn core.IConnection, _ core.IHeader, data json.RawMessage) {
+func (h *TopicBusHandler) handlePublish(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req publishReq
 	if err := json.Unmarshal(data, &req); err != nil {
 		return
@@ -138,10 +138,68 @@ func (h *TopicBusHandler) handlePublish(ctx context.Context, conn core.IConnecti
 		return
 	}
 
+	h.publishFlowTriggerEvent(ctx, hdr, req)
+	h.publishFlowReceivedEvent(ctx, conn, hdr, req)
+
 	// 先本层向下转发，再上送父节点。
 	payload, _ := json.Marshal(message{Action: actionPublish, Data: data})
 	h.broadcastToSubscribers(ctx, conn, req.Topic, payload)
 	h.forwardPublishUpstream(ctx, conn, payload)
+}
+
+func (h *TopicBusHandler) publishFlowTriggerEvent(ctx context.Context, hdr core.IHeader, req publishReq) {
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	eb := srv.EventBus()
+	if eb == nil {
+		return
+	}
+	meta := map[string]any{
+		"subproto": "topicbus",
+	}
+	if hdr != nil {
+		if src := hdr.SourceID(); src != 0 {
+			meta["source_node"] = src
+		}
+		if tgt := hdr.TargetID(); tgt != 0 {
+			meta["target_node"] = tgt
+		}
+	}
+	if err := eb.Publish(ctx, "topicbus.publish", req, meta); err != nil {
+		h.log.Debug("topicbus publish event emit failed", "err", err, "topic", req.Topic, "name", req.Name)
+	}
+}
+
+func (h *TopicBusHandler) publishFlowReceivedEvent(ctx context.Context, conn core.IConnection, hdr core.IHeader, req publishReq) {
+	if conn == nil || !isParentConn(conn) {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	eb := srv.EventBus()
+	if eb == nil {
+		return
+	}
+	meta := map[string]any{
+		"subproto":     "topicbus",
+		"from_parent":  true,
+		"receive_mode": "downstream",
+	}
+	if hdr != nil {
+		if src := hdr.SourceID(); src != 0 {
+			meta["source_node"] = src
+		}
+		if tgt := hdr.TargetID(); tgt != 0 {
+			meta["target_node"] = tgt
+		}
+	}
+	if err := eb.Publish(ctx, "topicbus.received", req, meta); err != nil {
+		h.log.Debug("topicbus received event emit failed", "err", err, "topic", req.Topic, "name", req.Name)
+	}
 }
 
 func (h *TopicBusHandler) sendSimpleResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any) {
@@ -436,6 +494,18 @@ func connNodeID(conn core.IConnection) uint32 {
 		}
 	}
 	return 0
+}
+
+func isParentConn(conn core.IConnection) bool {
+	if conn == nil {
+		return false
+	}
+	if role, ok := conn.GetMeta(core.MetaRoleKey); ok {
+		if s, ok2 := role.(string); ok2 && s == core.RoleParent {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *TopicBusHandler) maybeResubscribeUpstream(ctx context.Context) {

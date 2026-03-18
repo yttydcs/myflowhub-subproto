@@ -1274,11 +1274,42 @@ func hdrSourceID(h core.IHeader) uint32 {
 	return h.SourceID()
 }
 
+func (h *VarStoreHandler) publishFlowTriggerEvent(ctx context.Context, eventName string, owner uint32, name string, rec *varRecord) {
+	name = strings.TrimSpace(name)
+	if owner == 0 || name == "" || strings.TrimSpace(eventName) == "" {
+		return
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return
+	}
+	eb := srv.EventBus()
+	if eb == nil {
+		return
+	}
+	data := map[string]any{
+		"owner": owner,
+		"name":  name,
+	}
+	if rec != nil {
+		if v := strings.TrimSpace(rec.Type); v != "" {
+			data["type"] = v
+		}
+		if v := strings.TrimSpace(rec.Visibility); v != "" {
+			data["visibility"] = v
+		}
+	}
+	if err := eb.Publish(ctx, eventName, data, map[string]any{"subproto": "varstore"}); err != nil {
+		h.log.Debug("varstore trigger event emit failed", "err", err, "event", eventName, "owner", owner, "name", name)
+	}
+}
+
 func (h *VarStoreHandler) propagateChange(ctx context.Context, owner uint32, name string, rec varRecord, excludes ...uint32) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
 		return
 	}
+	h.publishFlowTriggerEvent(ctx, "varstore.changed", owner, name, &rec)
 	key := h.key(owner, name)
 	skip := make(map[uint32]struct{}, len(excludes))
 	for _, id := range excludes {
@@ -1322,6 +1353,7 @@ func (h *VarStoreHandler) propagateDelete(ctx context.Context, owner uint32, nam
 	if srv == nil {
 		return
 	}
+	h.publishFlowTriggerEvent(ctx, "varstore.deleted", owner, name, nil)
 	key := h.key(owner, name)
 	skip := make(map[uint32]struct{}, len(excludes)+1)
 	for _, id := range excludes {
