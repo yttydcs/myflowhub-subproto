@@ -900,15 +900,59 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 	state.mu.Unlock()
 }
 
-type localSpec struct {
+type callSpec struct {
+	Target uint32          `json:"target,omitempty"`
 	Method string          `json:"method"`
 	Args   json.RawMessage `json:"args,omitempty"`
 }
 
-type execSpec struct {
+type legacyLocalSpec struct {
+	Method string          `json:"method"`
+	Args   json.RawMessage `json:"args,omitempty"`
+}
+
+type legacyExecSpec struct {
 	Target uint32          `json:"target"`
 	Method string          `json:"method"`
 	Args   json.RawMessage `json:"args,omitempty"`
+}
+
+func decodeNodeCallSpec(n node) (callSpec, error) {
+	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	switch kind {
+	case "call":
+		var spec callSpec
+		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+			return callSpec{}, errors.New("invalid call spec")
+		}
+		spec.Method = strings.TrimSpace(spec.Method)
+		if spec.Method == "" {
+			return callSpec{}, errors.New("call method required")
+		}
+		return spec, nil
+	case "local":
+		var spec legacyLocalSpec
+		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+			return callSpec{}, errors.New("invalid local spec")
+		}
+		spec.Method = strings.TrimSpace(spec.Method)
+		if spec.Method == "" {
+			return callSpec{}, errors.New("local method required")
+		}
+		return callSpec{Method: spec.Method, Args: spec.Args}, nil
+	case "exec":
+		var spec legacyExecSpec
+		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+			return callSpec{}, errors.New("invalid exec spec")
+		}
+		spec.Method = strings.TrimSpace(spec.Method)
+		if spec.Target == 0 || spec.Method == "" {
+			return callSpec{}, errors.New("exec target/method required")
+		}
+		return callSpec{Target: spec.Target, Method: spec.Method, Args: spec.Args}, nil
+	default:
+		return callSpec{}, fmt.Errorf("unknown node kind: %s", kind)
+	}
 }
 
 func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code int, err error) {
@@ -922,17 +966,13 @@ func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code in
 		return 500, errors.New("no server")
 	}
 	local := srv.NodeID()
-	kind := strings.ToLower(strings.TrimSpace(n.Kind))
-	switch kind {
-	case "local":
-		var spec localSpec
-		if err := json.Unmarshal(n.Spec, &spec); err != nil {
-			return 400, errors.New("invalid local spec")
-		}
-		method := strings.TrimSpace(spec.Method)
-		if method == "" {
-			return 400, errors.New("local method required")
-		}
+	spec, specErr := decodeNodeCallSpec(n)
+	if specErr != nil {
+		return 400, specErr
+	}
+	method := spec.Method
+	target := spec.Target
+	if target == 0 || target == local {
 		if fn := h.localMethods[method]; fn != nil {
 			_, err := fn(ctx, spec.Args)
 			if err != nil {
@@ -956,50 +996,39 @@ func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code in
 				return 1, nil
 			}
 		}
-		return 404, fmt.Errorf("local method not found: %s", method)
-	case "exec":
-		var spec execSpec
-		if err := json.Unmarshal(n.Spec, &spec); err != nil {
-			return 400, errors.New("invalid exec spec")
-		}
-		target := spec.Target
-		method := strings.TrimSpace(spec.Method)
-		if target == 0 || method == "" {
-			return 400, errors.New("exec target/method required")
-		}
-		timeoutMs := 3000
-		if n.TimeoutMs != nil && *n.TimeoutMs > 0 {
-			timeoutMs = *n.TimeoutMs
-		}
-		reqID := newUUID()
-		ch, cancel := broker.SharedExecCallBroker().Register(reqID)
-		defer cancel()
+		return 404, fmt.Errorf("call method not found: %s", method)
+	}
 
-		call := protocolexec.CallReq{
-			ReqID:        reqID,
-			ExecutorNode: local,
-			TargetNode:   target,
-			Method:       method,
-			Args:         spec.Args,
-			TimeoutMs:    timeoutMs,
+	timeoutMs := 3000
+	if n.TimeoutMs != nil && *n.TimeoutMs > 0 {
+		timeoutMs = *n.TimeoutMs
+	}
+	reqID := newUUID()
+	ch, cancel := broker.SharedExecCallBroker().Register(reqID)
+	defer cancel()
+
+	call := protocolexec.CallReq{
+		ReqID:        reqID,
+		ExecutorNode: local,
+		TargetNode:   target,
+		Method:       method,
+		Args:         spec.Args,
+		TimeoutMs:    timeoutMs,
+	}
+	if err := h.sendExecCall(ctx, srv, call); err != nil {
+		return 500, err
+	}
+	select {
+	case resp, ok := <-ch:
+		if !ok {
+			return 500, errors.New("exec response closed")
 		}
-		if err := h.sendExecCall(ctx, srv, call); err != nil {
-			return 500, err
+		if resp.Code != 1 {
+			return resp.Code, errors.New(strings.TrimSpace(resp.Msg))
 		}
-		select {
-		case resp, ok := <-ch:
-			if !ok {
-				return 500, errors.New("exec response closed")
-			}
-			if resp.Code != 1 {
-				return resp.Code, errors.New(strings.TrimSpace(resp.Msg))
-			}
-			return 1, nil
-		case <-ctx.Done():
-			return 408, errors.New("timeout")
-		}
-	default:
-		return 400, fmt.Errorf("unknown node kind: %s", kind)
+		return 1, nil
+	case <-ctx.Done():
+		return 408, errors.New("timeout")
 	}
 }
 
@@ -1225,11 +1254,29 @@ func validateGraph(g graph) error {
 		if seen[id] {
 			return fmt.Errorf("duplicate node id: %s", id)
 		}
+		if err := validateSetNodeKindAndSpec(id, n); err != nil {
+			return err
+		}
 		seen[id] = true
 	}
 	// 基础拓扑校验（无环）
 	_, err := topoOrder(g)
 	return err
+}
+
+func validateSetNodeKindAndSpec(nodeID string, n node) error {
+	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	if kind != "call" {
+		return fmt.Errorf("node %s kind must be call", nodeID)
+	}
+	var spec callSpec
+	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+		return fmt.Errorf("node %s invalid call spec", nodeID)
+	}
+	if strings.TrimSpace(spec.Method) == "" {
+		return fmt.Errorf("node %s call method required", nodeID)
+	}
+	return nil
 }
 
 func topoOrder(g graph) ([]*node, error) {

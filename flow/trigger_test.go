@@ -142,7 +142,7 @@ func makeTestFlow(flowID string, tr trigger) setReq {
 			Nodes: []node{
 				{
 					ID:   "n1",
-					Kind: "local",
+					Kind: "call",
 					Spec: []byte(`{"method":"debug::echo","args":{"ok":true}}`),
 				},
 			},

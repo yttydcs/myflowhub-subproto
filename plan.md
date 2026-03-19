@@ -1,161 +1,165 @@
-# Plan - SubProto：通用能力注册中心（挂在 exec）与 flow 能力提供者
+# Plan - SubProto：Flow 节点统一为 call（Exec 作为远程调用能力）
 
 ## Workflow 信息
 - Repo：`MyFlowHub-SubProto`
-- 分支：`feat/capability-registry-ext`
-- Worktree：`d:\project\MyFlowHub3\repo\MyFlowHub-SubProto\repo\MyFlowHub-SubProto\worktrees\feat-capability-registry-ext`
+- 分支：`refactor/unified-call-node`
+- Worktree：`d:\project\MyFlowHub3\repo\MyFlowHub-SubProto\worktrees\refactor-unified-call-node`
 - Base：`main`
 
-## 项目目标与当前状态
-- 目标：
-  - 在 `exec` 域下提供“可被多子协议复用”的能力注册中心（非 flow 专用）。
-  - 补齐 `exec.call` 的能力级权限校验，并支持“同节点自动放行”。
-  - 让 `flow` 成为能力提供者，提供“调用指定 flow”的公开能力。
-- 当前状态：
-  - `exec` 已有逐级 `cap_snapshot/cap_query` 聚合机制，但本地能力来源主要是 `exec.RegisterMethod`。
-  - `CapabilityDescriptor.permissions` 已可上报/查询，`exec.call` 尚未对其做强制校验。
-  - `flow` 当前仅支持 DAG 本地 `local/exec` 节点执行，不作为公开能力提供者。
+## 1) 需求分析
 
-## 范围
+### 目标
+- 将 Flow DAG 节点语义收敛为统一 `call` 模型，避免 `local/exec` 二分。
+- 明确职责：
+  - `flow` 负责工作流编排与节点执行；
+  - `exec` 负责远程调用链路；
+  - 两者都作为能力提供者 / 消费者。
+- 新明确内容写入 SubProto 文档，便于后续协作与审计。
+
+### 范围
 - 必须：
-  - 增加通用能力注册中心（冲突策略 fail-fast，key=`method+version`，大小写敏感）。
-  - `exec` 改为从能力中心读取本地能力并执行本地调用。
-  - 新增能力级权限校验：
-    - 先过协议权限（既有）；
-    - 再过能力权限（descriptor.permissions）；
-    - 同节点 `caller_node == provider_node` 自动放行能力权限。
-  - `flow` 注册至少一个公开能力（调用指定 flow）。
+  - Flow 节点执行新增统一 `call` 路径（本地/远程由 `target` 决定）。
+  - Set 写入路径仅接受 `kind=call`（不保留旧写兼容）。
+  - `flow` 远程调用通过 `exec.call` 链路（`sendExecCall`）执行。
+  - 补齐单测覆盖：`call` 本地、`call` 远程、旧格式读取执行兼容、写入校验。
+  - 在 SubProto 文档中记录新的职责边界与节点模型。
 - 可选：
-  - 为更多子协议补充 provider 注册（本轮若不引入高风险改动可后续增量）。
+  - 旧 `local/exec` 历史数据读取后兼容执行（不作为新写入格式）。
 - 不做：
-  - 不改 wire 协议结构；
-  - 不引入自动选路替代显式 target（`exec` 仍严格指定目标节点）。
+  - 本轮不改 wire 协议字段结构（`protocol/flow.Node` 仍保留 `kind+spec`）。
+  - 本轮不改 Win 前端编辑器交互。
 
-## 验收标准
-- `exec`：
-  - 本地 capability 能力来源来自通用注册中心；
-  - 能力权限在 `exec.call` 生效；
-  - 同节点能力调用在 capability permission 层自动放行。
-- `flow`：
-  - 通过能力中心可发现 `flow` 提供的方法；
-  - 通过 `exec.call` 在目标节点执行该能力可触发对应 flow 运行。
-- 测试：
-  - `exec`、`flow`、`broker` 相关单测通过。
+### 使用场景
+- 用户在 Flow 中配置单一 `call` 节点：
+  - `target` 为空/0/本节点 → 本地能力调用；
+  - `target` 为其他节点 → 远程能力调用（经 exec）。
+
+### 功能需求
+- Flow `executeNode` 支持 `kind=call`。
+- `validateGraph` 对写入做 `kind=call` 强约束。
+- 运行期保留 `local/exec` 兼容解释（用于历史数据读取执行）。
+
+### 非功能需求
+- 性能：避免新增跨节点探测或重复查表，保持单节点 O(1) 方法路由。
+- 可维护：统一调用分发逻辑，减少分支重复。
+- 可扩展：后续增加调用选路策略时仅扩展 `call` spec。
+
+### 输入输出
+- 输入：`flow.set` 的 DAG 节点 `kind/spec`。
+- 输出：`flow.run/status` 行为一致；`flow.set` 对旧写格式返回 400。
+
+### 边界异常
+- `call.method` 为空 → 400。
+- `call.target` 非法（负值/0 视本地，远程必须正数）→ 本地/远程分支按规则处理。
+- 远程调用超时/拒绝沿用现有 `exec.call` 错误码。
+
+### 验收标准
+- `kind=call` 节点可成功执行本地与远程调用。
+- `kind=local/exec` 的新写入被拒绝。
+- 历史 `local/exec` 数据在运行期可执行（读取兼容）。
+- 文档包含职责边界与迁移说明。
+
+### 风险
+- Win 端若仍写 `local/exec` 将被后端拒绝（预期行为）。
+- 若历史数据存在非法 spec，运行时可能失败（保持显式错误）。
+
+阻塞：否
+
+---
+
+## 2) 架构设计（分析）
+
+### 总体方案
+- 采用统一 `call` 节点模型：
+  - `spec = { target?, method, args }`
+  - 本地调用：直接调本地方法表 + capability registry。
+  - 远程调用：复用 `exec.call` 请求/响应链路。
+
+### 选型理由
+- 相比保留 `local/exec` 双模型：
+  - 减少 UI/执行器分支复杂度；
+  - 更符合“能力提供者/消费者”统一抽象；
+  - 扩展新调用策略时无需新增节点 kind。
+
+### 备选方案对比
+- 方案 A（采用）：Flow 内统一 `call`，旧数据仅读兼容。
+- 方案 B（未采用）：继续公开 `local/exec`，仅内部共用逻辑。
+  - 问题：外部语义仍分裂，无法达成本轮目标。
+
+### 模块职责
+- `flow/handler.go`：节点 spec 解析、调用路由、写入校验。
+- `exec/handler.go`：远程调用裁决与执行（本轮不改协议）。
+- `docs/change/*`：记录职责边界与迁移策略。
+
+### 数据/调用流
+1. `flow.set`：`validateGraph` 要求 `kind=call`。
+2. `flow.run`：`executeNode` 解析调用 spec。
+3. `target` 本地：调用 `localMethods`，未命中再查 capability registry。
+4. `target` 远程：发送 `exec.call`，等待 `call_resp`。
+
+### 接口草案
+- `kind=call` spec：
+  - `target` `uint32` 可选；
+  - `method` `string` 必填；
+  - `args` `json` 可选。
+
+### 错误与安全
+- 写入阶段拒绝旧 kind，避免新数据继续扩散旧模型。
+- 远程调用仍走既有双层权限（协议权限+能力权限，由 exec 负责）。
+
+### 性能与测试策略
+- 保持现有 broker 等待模型，不新增额外网络跳。
+- 单测覆盖：本地调用、远程调用、旧格式运行、写入拒绝。
+
+### 可扩展性设计点
+- 后续可在 `callSpec` 增加 `version/route_policy` 字段，不破坏节点 kind 语义。
+
+阻塞：否
+
+---
 
 ## 3.1) 计划拆分（Checklist）
 
-### CAPREG-1 - 新增通用能力注册中心
-- 目标：在 `exec/capability` 子包实现 registry（注册/查询/冲突检测）。
-- 涉及文件：
-  - `exec/capability/registry.go`
-  - `exec/capability/registry_test.go`
-- 验收条件：
-  - 同 key 冲突可拒绝；
-  - 同 provider 同描述重复注册幂等。
-- 回滚点：revert 本任务提交。
-
-### CAPREG-2 - exec 接入能力中心并补齐能力权限
-- 目标：
-  - `exec` 本地方法执行改为基于 registry；
-  - `cap_query`/上行聚合读取 registry 本地能力；
-  - 增加 capability permission 校验与同节点自动放行。
-- 涉及文件：
-  - `exec/handler.go`
-- 验收条件：
-  - `exec.call` 在目标节点本地执行时生效能力权限；
-  - 同节点自动放行能力权限（协议权限仍生效）。
-- 测试点：
-  - 新增/更新 `exec` 单测覆盖 allow/deny/bypass 场景。
-- 回滚点：revert 本任务提交。
-
-### CAPREG-3 - flow 作为能力提供者（调用指定 flow）
-- 目标：`flow` 注册公开能力并实现本地运行入口。
+### UCN-1 - 统一 call 节点执行路径
+- 目标：在 `flow` 执行器中落地统一 `call` 解析与路由。
 - 涉及文件：
   - `flow/handler.go`
-  - `flow/go.mod`（如需新增 `exec` 模块依赖）
 - 验收条件：
-  - capability 列表可见 flow 能力；
-  - 调用后返回 run_id 并可在 status 查询。
+  - `kind=call` 支持本地与远程调用。
 - 测试点：
-  - 新增 `flow` 单测覆盖 capability 调用成功/参数校验。
-- 回滚点：revert 本任务提交。
+  - 本地 `debug::echo` / 远程 call 响应。
+- 回滚点：revert UCN-1 提交。
 
-### CAPREG-4 - Code Review（强制）
-- 逐项审查：需求覆盖/架构/性能风险/可读性/扩展性/稳定性与安全/测试覆盖。
-
-### CAPREG-5 - 归档变更（强制）
-- 输出：`docs/change/2026-03-19_exec-capability-registry-ext-flow-provider.md`
-
-## 追加迭代（Round-2：按“全开”补齐 provider）
-
-### 追加背景与回退原因
-- 在 CAPREG-1~5 基础上，用户追加要求“provider 全开”，即除 `flow` 外继续补齐 `varstore/topicbus/file/management` 的能力注册。
-- 该范围超出原 CAPREG-3（仅 flow provider），按规则回到 3.1 增补计划任务后再编码。
-
-### CAPREG-6 - varstore 能力提供者
-- 目标：注册 `varstore::set/get/revoke` 本地能力，能力执行作用于当前节点本地 var 数据。
-- 涉及文件：
-  - `varstore/varstore.go`
-  - `varstore/go.mod`
-  - `varstore/capability_provider_test.go`
-- 验收条件：
-  - 能力可被 registry 查询到；
-  - set/get/revoke 基础链路可用（参数校验、not found）。
-
-### CAPREG-7 - topicbus 能力提供者
-- 目标：注册 `topicbus::publish` 能力，支持发布事件并复用既有 topicbus 分发链路。
-- 涉及文件：
-  - `topicbus/topicbus.go`
-  - `topicbus/go.mod`
-  - `topicbus/capability_provider_test.go`
-- 验收条件：
-  - 能力可查询；
-  - 发布参数校验与成功返回可用。
-
-### CAPREG-8 - file 能力提供者
-- 目标：注册 `file::list/read_text/mkdir` 本地能力，复用现有路径安全策略。
-- 涉及文件：
-  - `file/handler.go`
-  - `file/go.mod`
-  - `file/capability_provider_test.go`
-- 验收条件：
-  - 能力可查询；
-  - list/read_text/mkdir 基础链路可用。
-
-### CAPREG-9 - management 能力提供者
-- 目标：注册 `management::list_nodes/node_info` 能力，支持从 server context 查询本机管理信息。
-- 涉及文件：
-  - `management/management.go`
-  - `management/go.mod`
-  - `management/capability_provider_test.go`
-- 验收条件：
-  - 能力可查询；
-  - 在有 server context 时返回节点与信息数据。
-
-## 追加迭代（Round-3：flow local 直连能力中心）
-
-### 追加背景与回退原因
-- 在 CAPREG-1~9 基础上，用户追加要求：`flow` 的 `local` 节点也可调用通用能力中心（方案 A：直接调用，不经 `exec(target=self)` 桥接）。
-- 该范围超出原 Round-2（仅 provider 注册与 exec 调用路径），按规则回到 3.1 增补计划任务后再编码。
-
-### CAPREG-10 - flow local 支持能力中心调用（A 方案）
-- 目标：
-  - `local` 节点执行时，保留现有 `localMethods` 语义，同时支持从 capability registry 查找并调用方法。
+### UCN-2 - 写入校验改为 call-only
+- 目标：`flow.set` 阶段拒绝 `local/exec` 新写入。
 - 涉及文件：
   - `flow/handler.go`
-  - `flow/capability_provider_test.go`（或新增邻近测试文件）
 - 验收条件：
-  - `local` 可调用 `varstore/topicbus/file/management/flow` 已注册能力；
-  - 历史 `debug::echo/debug::fail` 行为保持兼容；
-  - 未找到方法时仍返回明确错误。
-- 测试点：
-  - 使用同一 cfg 作用域初始化 provider + flow，验证 `local` 节点调用外部能力成功；
-  - 验证 `localMethods` 优先级与回退路径。
+  - `validateGraph` 返回明确错误信息。
+- 回滚点：revert UCN-2 提交。
 
-### CAPREG-11 - Round-3 Code Review 与归档补充
-- 目标：
-  - 对 Round-3 变更追加 review 结论，并补充到本次变更归档文档。
+### UCN-3 - 旧数据读取执行兼容
+- 目标：运行期仍可执行历史 `local/exec` 节点。
 - 涉及文件：
-  - `docs/change/2026-03-19_exec-capability-registry-ext-flow-provider.md`
+  - `flow/handler.go`
 - 验收条件：
-  - 文档包含 CAPREG-10 的任务映射、设计权衡、测试结果、回滚点。
+  - 兼容路径单测通过。
+- 回滚点：revert UCN-3 提交。
+
+### UCN-4 - 补充测试
+- 目标：覆盖 call 本地/远程与写入校验。
+- 涉及文件：
+  - `flow/local_capability_test.go`
+  - `flow/graph_test.go`
+  - `flow/handler_test.go`（如需新增）
+- 验收条件：
+  - `go test ./...` 在 `flow` 模块通过。
+- 回滚点：revert UCN-4 提交。
+
+### UCN-5 - 文档归档（SubProto）
+- 目标：记录职责重定义、节点模型迁移与影响。
+- 涉及文件：
+  - `docs/change/2026-03-19_unified-call-node-model.md`
+- 验收条件：
+  - 包含任务映射、权衡、测试与回滚方案。
+- 回滚点：revert UCN-5 提交。

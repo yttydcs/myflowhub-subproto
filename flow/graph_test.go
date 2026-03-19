@@ -1,12 +1,15 @@
 package flow
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateGraphOK(t *testing.T) {
 	g := graph{
 		Nodes: []node{
-			{ID: "A", Kind: "local", Spec: []byte(`{"method":"debug::echo","args":{"x":1}}`)},
-			{ID: "B", Kind: "local", Spec: []byte(`{"method":"debug::echo","args":{"x":2}}`)},
+			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo","args":{"x":1}}`)},
+			{ID: "B", Kind: "call", Spec: []byte(`{"target":2,"method":"debug::echo","args":{"x":2}}`)},
 		},
 		Edges: []edge{{From: "A", To: "B"}},
 	}
@@ -25,12 +28,27 @@ func TestValidateGraphOK(t *testing.T) {
 func TestValidateGraphCycle(t *testing.T) {
 	g := graph{
 		Nodes: []node{
-			{ID: "A", Kind: "local", Spec: []byte(`{"method":"debug::echo"}`)},
-			{ID: "B", Kind: "local", Spec: []byte(`{"method":"debug::echo"}`)},
+			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo"}`)},
+			{ID: "B", Kind: "call", Spec: []byte(`{"method":"debug::echo"}`)},
 		},
 		Edges: []edge{{From: "A", To: "B"}, {From: "B", To: "A"}},
 	}
 	if err := validateGraph(g); err == nil {
 		t.Fatalf("expected err, got nil")
+	}
+}
+
+func TestValidateGraphRejectsLegacyKind(t *testing.T) {
+	g := graph{
+		Nodes: []node{
+			{ID: "A", Kind: "local", Spec: []byte(`{"method":"debug::echo"}`)},
+		},
+	}
+	err := validateGraph(g)
+	if err == nil {
+		t.Fatalf("expected err, got nil")
+	}
+	if !strings.Contains(err.Error(), "kind must be call") {
+		t.Fatalf("unexpected err=%v", err)
 	}
 }

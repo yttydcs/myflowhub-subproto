@@ -21,7 +21,7 @@ func TestFlowRegistersCapabilityRun(t *testing.T) {
 			Nodes: []node{
 				{
 					ID:   "n1",
-					Kind: "local",
+					Kind: "call",
 					Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"world"}}`),
 				},
 			},
