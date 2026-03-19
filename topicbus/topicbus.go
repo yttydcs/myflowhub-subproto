@@ -3,6 +3,7 @@ package topicbus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/eventbus"
 	"github.com/yttydcs/myflowhub-core/header"
 	"github.com/yttydcs/myflowhub-core/subproto"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 // TopicBusHandler 提供 topic 的订阅/退订与逐级转发 publish。
@@ -37,13 +39,15 @@ type TopicBusHandler struct {
 	parentConnNode uint32
 
 	eventSubOnce sync.Once
+
+	capRegistry *execcap.Registry
 }
 
 func NewTopicBusHandler(log *slog.Logger) *TopicBusHandler {
 	return NewTopicBusHandlerWithConfig(nil, log)
 }
 
-func NewTopicBusHandlerWithConfig(_ core.IConfig, log *slog.Logger) *TopicBusHandler {
+func NewTopicBusHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *TopicBusHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -52,13 +56,57 @@ func NewTopicBusHandlerWithConfig(_ core.IConfig, log *slog.Logger) *TopicBusHan
 		topicSubs:      make(map[string]map[string]struct{}),
 		connSubs:       make(map[string]map[string]struct{}),
 		upstreamActive: make(map[string]bool),
+		capRegistry:    execcap.SharedRegistry(cfg),
 	}
+}
+
+const (
+	capabilityProviderTopicBus = "topicbus"
+	capabilityTopicPublish     = "topicbus::publish"
+)
+
+func (h *TopicBusHandler) registerCapabilities() {
+	if h.capRegistry == nil {
+		return
+	}
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderTopicBus,
+		Method:   capabilityTopicPublish,
+		Tags: map[string]string{
+			"subproto": "topicbus",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityPublish))
+}
+
+func (h *TopicBusHandler) invokeCapabilityPublish(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req publishReq
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid topicbus::publish args")
+	}
+	req.Topic = strings.TrimSpace(req.Topic)
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return nil, errors.New("name required")
+	}
+
+	h.publishFlowTriggerEvent(ctx, nil, req)
+	rawReq, _ := json.Marshal(req)
+	payload, _ := json.Marshal(message{Action: actionPublish, Data: rawReq})
+	h.broadcastToSubscribers(ctx, nil, req.Topic, payload)
+	h.forwardPublishUpstream(ctx, nil, payload)
+
+	resp, _ := json.Marshal(map[string]any{
+		"topic": req.Topic,
+		"name":  req.Name,
+	})
+	return resp, nil
 }
 
 func (h *TopicBusHandler) SubProto() uint8 { return SubProtoTopicBus }
 
 func (h *TopicBusHandler) Init() bool {
 	h.initActions()
+	h.registerCapabilities()
 	return true
 }
 

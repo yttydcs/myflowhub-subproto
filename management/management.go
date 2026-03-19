@@ -3,18 +3,25 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 
 	core "github.com/yttydcs/myflowhub-core"
 	"github.com/yttydcs/myflowhub-core/header"
 	"github.com/yttydcs/myflowhub-core/subproto"
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 type ManagementHandler struct {
 	subproto.ActionBaseSubProcess
 	log *slog.Logger
+
+	capMu       sync.Mutex
+	capRegistry *execcap.Registry
+	capReady    bool
 }
 
 func NewHandler(log *slog.Logger) *ManagementHandler {
@@ -30,6 +37,10 @@ func (h *ManagementHandler) SubProto() uint8 { return SubProtoManagement }
 func (h *ManagementHandler) Init() bool {
 	h.initActions()
 	return true
+}
+
+func (h *ManagementHandler) BindServer(srv core.IServer) {
+	h.ensureCapabilities(srv)
 }
 
 func (h *ManagementHandler) initActions() {
@@ -49,6 +60,7 @@ func (h *ManagementHandler) OnReceive(ctx context.Context, conn core.IConnection
 	if srv == nil {
 		return
 	}
+	h.ensureCapabilities(srv)
 	if hdr != nil && hdr.TargetID() != 0 && hdr.TargetID() != srv.NodeID() {
 		forwarded, code, msg := h.forwardCmdByHeaderTarget(ctx, conn, hdr, payload)
 		if forwarded {
@@ -63,6 +75,68 @@ func (h *ManagementHandler) OnReceive(ctx context.Context, conn core.IConnection
 		return
 	}
 	entry.Handle(ctx, conn, hdr, frame.Data)
+}
+
+const (
+	capabilityProviderManagement = "management"
+	capabilityMgmtListNodes      = "management::list_nodes"
+	capabilityMgmtNodeInfo       = "management::node_info"
+)
+
+func (h *ManagementHandler) ensureCapabilities(srv core.IServer) {
+	if srv == nil {
+		return
+	}
+	h.capMu.Lock()
+	if h.capReady {
+		h.capMu.Unlock()
+		return
+	}
+	h.capRegistry = execcap.SharedRegistry(srv.Config())
+	h.capReady = true
+	h.capMu.Unlock()
+
+	if h.capRegistry == nil {
+		return
+	}
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderManagement,
+		Method:   capabilityMgmtListNodes,
+		Tags: map[string]string{
+			"subproto": "management",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityListNodes))
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderManagement,
+		Method:   capabilityMgmtNodeInfo,
+		Tags: map[string]string{
+			"subproto": "management",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityNodeInfo))
+}
+
+func (h *ManagementHandler) invokeCapabilityListNodes(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return nil, errors.New("no server context")
+	}
+	nodes := enumerateDirectNodes(srv.ConnManager())
+	raw, _ := json.Marshal(map[string]any{
+		"nodes": nodes,
+	})
+	return raw, nil
+}
+
+func (h *ManagementHandler) invokeCapabilityNodeInfo(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	srv := core.ServerFromContext(ctx)
+	if srv == nil {
+		return nil, errors.New("no server context")
+	}
+	items := collectNodeInfoItems(srv.NodeID())
+	raw, _ := json.Marshal(map[string]any{
+		"items": items,
+	})
+	return raw, nil
 }
 
 // 内部响应工具

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/header"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 type VarStoreHandler struct {
@@ -37,7 +39,8 @@ type VarStoreHandler struct {
 	pendingSubs   map[pendingKey][]pendingSubscriber        // pending subscribe (with subscriber id)
 	eventSubOnce  sync.Once
 
-	permCfg *permission.Config
+	permCfg     *permission.Config
+	capRegistry *execcap.Registry
 }
 
 func NewVarStoreHandler(log *slog.Logger) *VarStoreHandler {
@@ -63,6 +66,7 @@ func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreH
 		connSubs:      make(map[string]map[string]struct{}),
 		upstreamSubs:  make(map[string]bool),
 		pendingSubs:   make(map[pendingKey][]pendingSubscriber),
+		capRegistry:   execcap.SharedRegistry(cfg),
 	}
 	if cfg != nil {
 		h.permCfg = permission.SharedConfig(cfg)
@@ -70,13 +74,147 @@ func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreH
 	if h.permCfg == nil {
 		h.permCfg = permission.NewConfig(nil)
 	}
+	h.registerCapabilities()
 	return h
 }
 
 const (
 	pendingWriteTTL           = 90 * time.Second
 	pendingWriteSweepInterval = 15 * time.Second
+
+	capabilityProviderVarStore = "varstore"
+	capabilityVarSetMethod     = "varstore::set"
+	capabilityVarGetMethod     = "varstore::get"
+	capabilityVarRevokeMethod  = "varstore::revoke"
 )
+
+func (h *VarStoreHandler) registerCapabilities() {
+	if h.capRegistry == nil {
+		return
+	}
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderVarStore,
+		Method:   capabilityVarSetMethod,
+		Tags: map[string]string{
+			"subproto": "varstore",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilitySet))
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderVarStore,
+		Method:   capabilityVarGetMethod,
+		Tags: map[string]string{
+			"subproto": "varstore",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityGet))
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderVarStore,
+		Method:   capabilityVarRevokeMethod,
+		Tags: map[string]string{
+			"subproto": "varstore",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityRevoke))
+}
+
+func (h *VarStoreHandler) invokeCapabilitySet(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Owner      uint32 `json:"owner"`
+		Name       string `json:"name"`
+		Value      string `json:"value"`
+		Type       string `json:"type,omitempty"`
+		Visibility string `json:"visibility,omitempty"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid varstore::set args")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Visibility = strings.ToLower(strings.TrimSpace(req.Visibility))
+	if req.Owner == 0 || !validVarName(req.Name) || strings.TrimSpace(req.Value) == "" {
+		return nil, errors.New("owner/name/value required")
+	}
+	if req.Visibility != "" && req.Visibility != visibilityPrivate && req.Visibility != visibilityPublic {
+		return nil, errors.New("invalid visibility")
+	}
+
+	rec, _ := h.lookupOwned(req.Owner, req.Name)
+	rec.Owner = req.Owner
+	rec.Value = req.Value
+	if t := strings.TrimSpace(req.Type); t != "" {
+		rec.Type = t
+	} else if rec.Type == "" {
+		rec.Type = "string"
+	}
+	if req.Visibility != "" {
+		rec.Visibility = req.Visibility
+		rec.IsPublic = req.Visibility == visibilityPublic
+	} else if strings.TrimSpace(rec.Visibility) == "" {
+		rec.Visibility = visibilityPrivate
+		rec.IsPublic = false
+	}
+
+	h.saveRecord(req.Name, rec)
+	h.publishFlowTriggerEvent(ctx, "varstore.changed", req.Owner, req.Name, &rec)
+	resp, _ := json.Marshal(map[string]any{
+		"owner":      rec.Owner,
+		"name":       req.Name,
+		"value":      rec.Value,
+		"type":       rec.Type,
+		"visibility": rec.Visibility,
+		"is_public":  rec.IsPublic,
+	})
+	return resp, nil
+}
+
+func (h *VarStoreHandler) invokeCapabilityGet(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Owner uint32 `json:"owner"`
+		Name  string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid varstore::get args")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Owner == 0 || !validVarName(req.Name) {
+		return nil, errors.New("owner/name required")
+	}
+	rec, ok := h.lookupOwned(req.Owner, req.Name)
+	if !ok {
+		return nil, errors.New("var not found")
+	}
+	resp, _ := json.Marshal(map[string]any{
+		"owner":      rec.Owner,
+		"name":       req.Name,
+		"value":      rec.Value,
+		"type":       rec.Type,
+		"visibility": rec.Visibility,
+		"is_public":  rec.IsPublic,
+	})
+	return resp, nil
+}
+
+func (h *VarStoreHandler) invokeCapabilityRevoke(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Owner uint32 `json:"owner"`
+		Name  string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid varstore::revoke args")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Owner == 0 || !validVarName(req.Name) {
+		return nil, errors.New("owner/name required")
+	}
+	if _, ok := h.lookupOwned(req.Owner, req.Name); !ok {
+		return nil, errors.New("var not found")
+	}
+	h.deleteRecord(req.Owner, req.Name)
+	h.publishFlowTriggerEvent(ctx, "varstore.deleted", req.Owner, req.Name, nil)
+	resp, _ := json.Marshal(map[string]any{
+		"owner":   req.Owner,
+		"name":    req.Name,
+		"deleted": true,
+	})
+	return resp, nil
+}
 
 var writeMsgSeq atomic.Uint32
 var writeMsgSeqInit sync.Once

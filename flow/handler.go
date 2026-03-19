@@ -23,6 +23,7 @@ import (
 
 	protocolexec "github.com/yttydcs/myflowhub-proto/protocol/exec"
 	"github.com/yttydcs/myflowhub-subproto/broker"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 type LocalMethodFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
@@ -47,6 +48,7 @@ type Handler struct {
 	eventSubOnce sync.Once
 
 	localMethods map[string]LocalMethodFunc
+	capRegistry  *execcap.Registry
 }
 
 type flowScheduler struct {
@@ -72,6 +74,9 @@ const (
 	eventModePublish  = "publish"
 	eventModeReceived = "received"
 	eventModeAny      = "any"
+
+	capabilityProviderFlow = "flow"
+	capabilityMethodRun    = "flow::run"
 )
 
 type topicPublishEvent struct {
@@ -101,6 +106,7 @@ func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 		runs:         make(map[string]*runState),
 		schedulers:   make(map[string]*flowScheduler),
 		localMethods: make(map[string]LocalMethodFunc),
+		capRegistry:  execcap.SharedRegistry(cfg),
 	}
 	if cfg != nil {
 		h.permCfg = permission.SharedConfig(cfg)
@@ -118,6 +124,7 @@ func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	h.RegisterLocalMethod("debug::fail", func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("forced failure")
 	})
+	h.registerCapabilities()
 	return h
 }
 
@@ -156,6 +163,50 @@ func (h *Handler) RegisterLocalMethod(method string, fn LocalMethodFunc) {
 		return
 	}
 	h.localMethods[method] = fn
+}
+
+func (h *Handler) registerCapabilities() {
+	if h.capRegistry == nil {
+		return
+	}
+	err := h.capRegistry.Register(execcap.Descriptor{
+		Provider: capabilityProviderFlow,
+		Method:   capabilityMethodRun,
+		Tags: map[string]string{
+			"subproto": "flow",
+		},
+		InputSchema:  json.RawMessage(`{"type":"object","required":["flow_id"],"properties":{"flow_id":{"type":"string","minLength":1}}}`),
+		OutputSchema: json.RawMessage(`{"type":"object","required":["flow_id","run_id"],"properties":{"flow_id":{"type":"string"},"run_id":{"type":"string"}}}`),
+	}, execcap.InvokeFunc(h.invokeCapabilityRun))
+	if err != nil {
+		h.log.Warn("flow register capability failed", "method", capabilityMethodRun, "err", err)
+	}
+}
+
+func (h *Handler) invokeCapabilityRun(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		FlowID string `json:"flow_id"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid flow::run args")
+	}
+	req.FlowID = strings.TrimSpace(req.FlowID)
+	if req.FlowID == "" {
+		return nil, errors.New("flow_id required")
+	}
+
+	h.mu.Lock()
+	flow, ok := h.flows[req.FlowID]
+	h.mu.Unlock()
+	if !ok || strings.TrimSpace(flow.FlowID) == "" {
+		return nil, errors.New("flow not found")
+	}
+
+	runID := h.enqueueRun(context.Background(), flow)
+	return mustJSON(map[string]string{
+		"flow_id": flow.FlowID,
+		"run_id":  runID,
+	}), nil
 }
 
 func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
@@ -484,18 +535,7 @@ func (h *Handler) runLocal(ctx context.Context, hdr core.IHeader, req runReq) {
 		return
 	}
 
-	runID := newUUID()
-	state := &runState{
-		flowID: flow.FlowID,
-		runID:  runID,
-		status: "queued",
-		nodes:  make(map[string]nodeStatus),
-		start:  time.Now(),
-	}
-	h.mu.Lock()
-	h.runs[runID] = state
-	h.mu.Unlock()
-	go h.executeFlow(ctx, flow, state)
+	runID := h.enqueueRun(ctx, flow)
 
 	h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID, RunID: runID})
 }
@@ -893,18 +933,30 @@ func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code in
 		if method == "" {
 			return 400, errors.New("local method required")
 		}
-		fn := h.localMethods[method]
-		if fn == nil {
-			return 404, fmt.Errorf("local method not found: %s", method)
-		}
-		_, err := fn(ctx, spec.Args)
-		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				return 408, err
+		if fn := h.localMethods[method]; fn != nil {
+			_, err := fn(ctx, spec.Args)
+			if err != nil {
+				if ctx.Err() == context.DeadlineExceeded {
+					return 408, err
+				}
+				return 500, err
 			}
-			return 500, err
+			return 1, nil
 		}
-		return 1, nil
+		if h.capRegistry != nil {
+			_, invoke, ok := h.capRegistry.Lookup(method, "")
+			if ok && invoke != nil {
+				_, err := invoke(ctx, spec.Args)
+				if err != nil {
+					if ctx.Err() == context.DeadlineExceeded {
+						return 408, err
+					}
+					return 500, err
+				}
+				return 1, nil
+			}
+		}
+		return 404, fmt.Errorf("local method not found: %s", method)
 	case "exec":
 		var spec execSpec
 		if err := json.Unmarshal(n.Spec, &spec); err != nil {
@@ -1434,6 +1486,25 @@ func (h *Handler) restartScheduler(flowID string) {
 
 func (h *Handler) tryStartScheduledRun(flowID string) {
 	h.tryStartRun(flowID)
+}
+
+func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runID := newUUID()
+	state := &runState{
+		flowID: flow.FlowID,
+		runID:  runID,
+		status: "queued",
+		nodes:  make(map[string]nodeStatus),
+		start:  time.Now(),
+	}
+	h.mu.Lock()
+	h.runs[runID] = state
+	h.mu.Unlock()
+	go h.executeFlow(ctx, flow, state)
+	return runID
 }
 
 func (h *Handler) tryStartRun(flowID string) {

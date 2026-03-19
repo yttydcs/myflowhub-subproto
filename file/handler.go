@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -20,11 +21,17 @@ import (
 	"github.com/yttydcs/myflowhub-core/header"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 const (
 	permRead  = "file.read"
 	permWrite = "file.write"
+
+	capabilityProviderFile = "file"
+	capabilityFileList     = "file::list"
+	capabilityFileReadText = "file::read_text"
+	capabilityFileMkdir    = "file::mkdir"
 )
 
 type Handler struct {
@@ -39,6 +46,8 @@ type Handler struct {
 
 	janitorRunning atomic.Bool
 	lastJanitorSec atomic.Int64
+
+	capRegistry *execcap.Registry
 }
 
 func NewHandler(log *slog.Logger) *Handler {
@@ -50,10 +59,11 @@ func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 		log = slog.Default()
 	}
 	h := &Handler{
-		log:  log,
-		cfg:  cfg,
-		recv: make(map[[16]byte]*recvSession),
-		send: make(map[[16]byte]*sendSession),
+		log:         log,
+		cfg:         cfg,
+		recv:        make(map[[16]byte]*recvSession),
+		send:        make(map[[16]byte]*sendSession),
+		capRegistry: execcap.SharedRegistry(cfg),
 	}
 	if cfg != nil {
 		h.permCfg = permission.SharedConfig(cfg)
@@ -61,7 +71,164 @@ func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	if h.permCfg == nil {
 		h.permCfg = permission.NewConfig(nil)
 	}
+	h.registerCapabilities()
 	return h
+}
+
+func (h *Handler) registerCapabilities() {
+	if h.capRegistry == nil {
+		return
+	}
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider:    capabilityProviderFile,
+		Method:      capabilityFileList,
+		Permissions: []string{permRead},
+		Tags: map[string]string{
+			"subproto": "file",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityList))
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider:    capabilityProviderFile,
+		Method:      capabilityFileReadText,
+		Permissions: []string{permRead},
+		Tags: map[string]string{
+			"subproto": "file",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityReadText))
+	_ = h.capRegistry.Register(execcap.Descriptor{
+		Provider:    capabilityProviderFile,
+		Method:      capabilityFileMkdir,
+		Permissions: []string{permWrite},
+		Tags: map[string]string{
+			"subproto": "file",
+		},
+	}, execcap.InvokeFunc(h.invokeCapabilityMkdir))
+}
+
+func (h *Handler) invokeCapabilityList(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Dir string `json:"dir,omitempty"`
+	}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &req); err != nil {
+			return nil, errors.New("invalid file::list args")
+		}
+	}
+	cfg := loadConfig(h.cfg)
+	dir, err := sanitizeDir(req.Dir)
+	if err != nil {
+		return nil, errors.New("invalid dir")
+	}
+	root := filepath.Join(cfg.BaseDir, filepath.FromSlash(dir))
+	if dir == "" {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return nil, errors.New("mkdir failed")
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if dir == "" {
+			return nil, errors.New("read failed")
+		}
+		return nil, errors.New("not found")
+	}
+	dirs := make([]string, 0, len(entries))
+	files := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+			continue
+		}
+		files = append(files, e.Name())
+	}
+	sort.Strings(dirs)
+	sort.Strings(files)
+	raw, _ := json.Marshal(map[string]any{
+		"dir":   dir,
+		"files": files,
+		"dirs":  dirs,
+	})
+	return raw, nil
+}
+
+func (h *Handler) invokeCapabilityReadText(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Dir      string `json:"dir,omitempty"`
+		Name     string `json:"name"`
+		MaxBytes int    `json:"max_bytes,omitempty"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid file::read_text args")
+	}
+	cfg := loadConfig(h.cfg)
+	dir := strings.TrimSpace(req.Dir)
+	name := strings.TrimSpace(req.Name)
+	finalPath, _, err := resolvePaths(cfg.BaseDir, dir, name)
+	if err != nil {
+		return nil, errors.New("invalid path")
+	}
+	info, err := os.Stat(finalPath)
+	if err != nil || info == nil || info.IsDir() {
+		return nil, errors.New("not found")
+	}
+	if cfg.MaxSizeBytes > 0 && uint64(info.Size()) > cfg.MaxSizeBytes {
+		return nil, errors.New("too large")
+	}
+
+	maxBytes := uint32(req.MaxBytes)
+	if maxBytes == 0 {
+		maxBytes = 64 * 1024
+	}
+	if maxBytes > 256*1024 {
+		maxBytes = 256 * 1024
+	}
+	f, err := os.Open(finalPath)
+	if err != nil {
+		return nil, errors.New("open failed")
+	}
+	defer func() { _ = f.Close() }()
+
+	buf := make([]byte, maxBytes)
+	n, rerr := io.ReadFull(f, buf)
+	if rerr == io.ErrUnexpectedEOF || rerr == io.EOF {
+	} else if rerr != nil {
+		return nil, errors.New("read failed")
+	}
+	buf = buf[:n]
+	if !utf8.Valid(buf) {
+		return nil, errors.New("not text")
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"dir":       dir,
+		"name":      name,
+		"size":      uint64(info.Size()),
+		"text":      string(buf),
+		"truncated": uint64(len(buf)) < uint64(info.Size()),
+	})
+	return raw, nil
+}
+
+func (h *Handler) invokeCapabilityMkdir(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Dir  string `json:"dir,omitempty"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, errors.New("invalid file::mkdir args")
+	}
+	cfg := loadConfig(h.cfg)
+	dir, name, code, msg := mkdirLocalDir(cfg.BaseDir, req.Dir, req.Name)
+	if code != 1 {
+		return nil, errors.New(msg)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"dir":  dir,
+		"name": name,
+	})
+	return raw, nil
 }
 
 func (h *Handler) SubProto() uint8 { return SubProtoFile }

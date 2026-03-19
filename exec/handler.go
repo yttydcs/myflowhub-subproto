@@ -16,6 +16,7 @@ import (
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
 	"github.com/yttydcs/myflowhub-subproto/broker"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 type MethodFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
@@ -26,7 +27,8 @@ type Handler struct {
 
 	permCfg *permission.Config
 
-	methods map[string]MethodFunc
+	capRegistry   *execcap.Registry
+	capSelfBypass bool
 
 	capMu        sync.RWMutex
 	capLocal     map[string]CapabilityDescriptor
@@ -51,6 +53,7 @@ const (
 	defaultCapabilityLease = 60 * time.Second
 	maxCapQueryLimit       = 200
 	capQueryForwardTimeout = 3 * time.Second
+	capPermissionBypassKey = "exec.cap.permission.self_bypass"
 )
 
 func NewHandler(log *slog.Logger) *Handler {
@@ -62,10 +65,11 @@ func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 		log = slog.Default()
 	}
 	h := &Handler{
-		log:         log,
-		methods:     make(map[string]MethodFunc),
-		capLocal:    make(map[string]CapabilityDescriptor),
-		capChildren: make(map[uint32]capPeerState),
+		log:           log,
+		capRegistry:   execcap.SharedRegistry(cfg),
+		capSelfBypass: loadCapPermissionSelfBypass(cfg),
+		capLocal:      make(map[string]CapabilityDescriptor),
+		capChildren:   make(map[uint32]capPeerState),
 	}
 	if cfg != nil {
 		h.permCfg = permission.SharedConfig(cfg)
@@ -105,11 +109,18 @@ func (h *Handler) RegisterMethod(method string, fn MethodFunc) {
 	if method == "" || fn == nil {
 		return
 	}
-	h.methods[method] = fn
-	desc := CapabilityDescriptor{Method: method}
-	h.capMu.Lock()
-	h.capLocal[capKey(0, method, "")] = desc
-	h.capMu.Unlock()
+	if h.capRegistry == nil {
+		return
+	}
+	err := h.capRegistry.Register(execcap.Descriptor{
+		Provider: "exec",
+		Method:   method,
+	}, execcap.InvokeFunc(fn))
+	if err != nil {
+		h.log.Warn("exec register local capability failed", "method", method, "err", err)
+		return
+	}
+	h.refreshLocalCapsFromRegistry()
 }
 
 func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
@@ -619,12 +630,16 @@ func (h *Handler) execLocal(ctx context.Context, reqHdr core.IHeader, req CallRe
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	fn, ok := h.methods[req.Method]
-	if !ok || fn == nil {
+	desc, invoke, ok := h.lookupLocalCapability(req.Method)
+	if !ok || invoke == nil {
 		h.sendCallRespToNode(ctx, reqHdr, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: 404, Msg: "method not found", ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method})
 		return
 	}
-	res, err := fn(callCtx, req.Args)
+	if !h.hasCapabilityPermission(req.ExecutorNode, local, desc.Permissions) {
+		h.sendCallRespToNode(ctx, reqHdr, req.ExecutorNode, CallResp{ReqID: req.ReqID, Code: 403, Msg: "capability permission denied", ExecutorNode: req.ExecutorNode, TargetNode: local, Method: req.Method})
+		return
+	}
+	res, err := invoke(callCtx, req.Args)
 	if err != nil {
 		code := 500
 		if callCtx.Err() == context.DeadlineExceeded {
@@ -689,6 +704,7 @@ func (h *Handler) maybeSyncSnapshotUpstream(ctx context.Context, force bool) {
 	if srv == nil || srv.ConnManager() == nil {
 		return
 	}
+	h.refreshLocalCapsFromRegistry()
 	parent := findParentConn(srv.ConnManager())
 	if parent == nil {
 		h.capMu.Lock()
@@ -1162,6 +1178,7 @@ func normalizeLease(leaseMs uint64) time.Duration {
 }
 
 func (h *Handler) queryCapabilityRoutes(req CapQueryReq, localNode uint32) (int, []CapabilityRoute) {
+	h.refreshLocalCapsFromRegistry()
 	methodFilter := strings.TrimSpace(req.Method)
 	limit := req.Limit
 	if limit <= 0 {
@@ -1228,6 +1245,86 @@ func (h *Handler) queryCapabilityRoutes(req CapQueryReq, localNode uint32) (int,
 		filtered = filtered[:limit]
 	}
 	return total, filtered
+}
+
+func (h *Handler) lookupLocalCapability(method string) (CapabilityDescriptor, MethodFunc, bool) {
+	if h.capRegistry == nil {
+		return CapabilityDescriptor{}, nil, false
+	}
+	desc, invoke, ok := h.capRegistry.Lookup(method, "")
+	if !ok {
+		return CapabilityDescriptor{}, nil, false
+	}
+	return capabilityDescriptorFromRegistry(desc), MethodFunc(invoke), true
+}
+
+func (h *Handler) hasCapabilityPermission(callerNode, providerNode uint32, perms []string) bool {
+	if len(perms) == 0 {
+		return true
+	}
+	if h.capSelfBypass && callerNode != 0 && callerNode == providerNode {
+		return true
+	}
+	for _, perm := range perms {
+		perm = strings.TrimSpace(perm)
+		if perm == "" {
+			continue
+		}
+		if h.hasPermission(callerNode, perm) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) refreshLocalCapsFromRegistry() {
+	if h.capRegistry == nil {
+		return
+	}
+	descs := h.capRegistry.List()
+	next := make(map[string]CapabilityDescriptor, len(descs))
+	for _, desc := range descs {
+		wire := capabilityDescriptorFromRegistry(desc)
+		next[capKey(0, wire.Method, wire.Version)] = wire
+	}
+	h.capMu.Lock()
+	h.capLocal = next
+	h.capMu.Unlock()
+}
+
+func capabilityDescriptorFromRegistry(desc execcap.Descriptor) CapabilityDescriptor {
+	out := CapabilityDescriptor{
+		Method:           strings.TrimSpace(desc.Method),
+		Version:          strings.TrimSpace(desc.Version),
+		DefaultTimeoutMs: desc.DefaultTimeoutMs,
+	}
+	if len(desc.InputSchema) > 0 {
+		out.InputSchema = cloneRaw(desc.InputSchema)
+	}
+	if len(desc.OutputSchema) > 0 {
+		out.OutputSchema = cloneRaw(desc.OutputSchema)
+	}
+	if len(desc.Permissions) > 0 {
+		out.Permissions = append([]string(nil), desc.Permissions...)
+	}
+	if len(desc.Tags) > 0 {
+		out.Tags = make(map[string]string, len(desc.Tags))
+		for key, val := range desc.Tags {
+			out.Tags[key] = val
+		}
+	}
+	return out
+}
+
+func loadCapPermissionSelfBypass(cfg core.IConfig) bool {
+	if cfg == nil {
+		return true
+	}
+	raw, ok := cfg.Get(capPermissionBypassKey)
+	if !ok {
+		return true
+	}
+	return core.ParseBool(raw, true)
 }
 
 func capabilityRouteFromDesc(desc CapabilityDescriptor, via uint32, leaseExpireAt time.Time, includeSchema bool) CapabilityRoute {
