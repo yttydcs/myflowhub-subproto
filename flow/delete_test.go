@@ -16,10 +16,10 @@ import (
 
 func TestFlowDeleteSuccess(t *testing.T) {
 	h, srv, childConn, ctx, baseDir := newDeleteTestEnv(t, nil)
-	flowID := "flow-1"
+	flowID := "123e4567-e89b-12d3-a456-426614174000"
 	h.flows[flowID] = setReq{FlowID: flowID}
 	h.schedulers[flowID] = &flowScheduler{stop: make(chan struct{})}
-	if err := os.WriteFile(filepath.Join(baseDir, flowID+".json"), []byte(`{"flow_id":"flow-1"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(baseDir, flowID+".json"), []byte(`{"flow_id":"123e4567-e89b-12d3-a456-426614174000"}`), 0o644); err != nil {
 		t.Fatalf("write flow file err=%v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestFlowDeleteSuccess(t *testing.T) {
 
 func TestFlowDeleteNotFound(t *testing.T) {
 	h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
-	req := deleteReq{ReqID: "req-del-404", FlowID: "missing-flow"}
+	req := deleteReq{ReqID: "req-del-404", FlowID: "123e4567-e89b-12d3-a456-426614174099"}
 	reqHdr := (&header.HeaderTcp{}).
 		WithMajor(header.MajorCmd).
 		WithSubProto(SubProtoFlow).
@@ -72,7 +72,7 @@ func TestFlowDeleteNotFound(t *testing.T) {
 		t.Fatalf("expected 1 response frame, got=%d", len(srv.sends))
 	}
 	resp := mustDecodeDeleteResp(t, srv.sends[0].payload)
-	if resp.Code != 404 || resp.FlowID != "missing-flow" {
+	if resp.Code != 404 || resp.FlowID != "123e4567-e89b-12d3-a456-426614174099" {
 		t.Fatalf("unexpected delete not-found resp: %#v", resp)
 	}
 }
@@ -82,9 +82,9 @@ func TestFlowDeletePermissionDenied(t *testing.T) {
 		coreconfig.KeyAuthDefaultRole:  "node",
 		coreconfig.KeyAuthDefaultPerms: permFlowSet,
 	})
-	flowID := "flow-no-perm"
+	flowID := "123e4567-e89b-12d3-a456-426614174001"
 	h.flows[flowID] = setReq{FlowID: flowID}
-	if err := os.WriteFile(filepath.Join(baseDir, flowID+".json"), []byte(`{"flow_id":"flow-no-perm"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(baseDir, flowID+".json"), []byte(`{"flow_id":"123e4567-e89b-12d3-a456-426614174001"}`), 0o644); err != nil {
 		t.Fatalf("write flow file err=%v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestFlowDeleteInterruptsActiveRun(t *testing.T) {
 		return nil, ctx.Err()
 	})
 
-	flowID := "flow-running"
+	flowID := "123e4567-e89b-12d3-a456-426614174002"
 	timeoutMs := 10_000
 	retry := 0
 	flowDef := setReq{
@@ -151,7 +151,7 @@ func TestFlowDeleteInterruptsActiveRun(t *testing.T) {
 		},
 	}
 	h.flows[flowID] = flowDef
-	if err := os.WriteFile(filepath.Join(baseDir, flowID+".json"), []byte(`{"flow_id":"flow-running"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(baseDir, flowID+".json"), []byte(`{"flow_id":"123e4567-e89b-12d3-a456-426614174002"}`), 0o644); err != nil {
 		t.Fatalf("write flow file err=%v", err)
 	}
 

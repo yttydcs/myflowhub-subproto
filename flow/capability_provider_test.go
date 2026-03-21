@@ -15,8 +15,9 @@ func TestFlowRegistersCapabilityRun(t *testing.T) {
 	cfg := coreconfig.NewMap(map[string]string{})
 	h := NewHandlerWithConfig(cfg, nil)
 	h.srv = &testServer{nodeID: 1, cm: connmgr.New()}
-	h.flows["flow-1"] = setReq{
-		FlowID: "flow-1",
+	flowID := "123e4567-e89b-12d3-a456-426614174003"
+	h.flows[flowID] = setReq{
+		FlowID: flowID,
 		Graph: graph{
 			Nodes: []node{
 				{
@@ -34,7 +35,7 @@ func TestFlowRegistersCapabilityRun(t *testing.T) {
 		t.Fatalf("expected flow::run capability registered")
 	}
 
-	raw, err := invoke(context.Background(), json.RawMessage(`{"flow_id":"flow-1"}`))
+	raw, err := invoke(context.Background(), json.RawMessage(`{"flow_id":"123e4567-e89b-12d3-a456-426614174003"}`))
 	if err != nil {
 		t.Fatalf("invoke flow::run err=%v", err)
 	}
@@ -42,7 +43,7 @@ func TestFlowRegistersCapabilityRun(t *testing.T) {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		t.Fatalf("unmarshal flow::run result err=%v", err)
 	}
-	if resp["flow_id"] != "flow-1" || resp["run_id"] == "" {
+	if resp["flow_id"] != flowID || resp["run_id"] == "" {
 		t.Fatalf("unexpected flow::run result=%v", resp)
 	}
 
