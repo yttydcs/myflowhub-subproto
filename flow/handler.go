@@ -38,9 +38,11 @@ type Handler struct {
 
 	mu sync.Mutex
 
-	baseDir string
-	flows   map[string]setReq
-	runs    map[string]*runState // run_id -> state
+	baseDir         string
+	maxRetainedRuns int
+	flows           map[string]setReq
+	runs            map[string]*runState // run_id -> state
+	runOrderByFlow  map[string][]string  // flow_id -> ordered run_ids (oldest -> newest)
 
 	schedulers map[string]*flowScheduler // flow_id -> scheduler
 
@@ -104,14 +106,18 @@ func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
+	loadedCfg := loadConfig(cfg)
 	h := &Handler{
-		log:          log,
-		cfg:          cfg,
-		flows:        make(map[string]setReq),
-		runs:         make(map[string]*runState),
-		schedulers:   make(map[string]*flowScheduler),
-		localMethods: make(map[string]LocalMethodFunc),
-		capRegistry:  execcap.SharedRegistry(cfg),
+		log:             log,
+		cfg:             cfg,
+		baseDir:         loadedCfg.BaseDir,
+		maxRetainedRuns: loadedCfg.MaxRetainedRuns,
+		flows:           make(map[string]setReq),
+		runs:            make(map[string]*runState),
+		runOrderByFlow:  make(map[string][]string),
+		schedulers:      make(map[string]*flowScheduler),
+		localMethods:    make(map[string]LocalMethodFunc),
+		capRegistry:     execcap.SharedRegistry(cfg),
 	}
 	if cfg != nil {
 		h.permCfg = permission.SharedConfig(cfg)
@@ -148,7 +154,9 @@ func (h *Handler) AcceptCmd() bool { return true }
 func (h *Handler) SubProto() uint8 { return SubProtoFlow }
 
 func (h *Handler) Init() bool {
-	h.baseDir = loadConfig(h.cfg).BaseDir
+	cfg := loadConfig(h.cfg)
+	h.baseDir = cfg.BaseDir
+	h.maxRetainedRuns = cfg.MaxRetainedRuns
 	_ = os.MkdirAll(h.baseDir, 0o755)
 	h.loadFlowsFromDisk()
 	h.initActions()
@@ -435,7 +443,7 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 			return
 		}
 		upHdr.WithTargetID(parentNode)
-		h.sendToConn(ctx, parent, upHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
+		_ = h.sendToConn(ctx, parent, upHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
 		return
 	}
 
@@ -453,7 +461,7 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 			return
 		}
 		childHdr.WithTargetID(nextNode)
-		h.sendToConn(ctx, originConn, childHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
+		_ = h.sendToConn(ctx, originConn, childHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
 		return
 	}
 
@@ -468,7 +476,7 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 		return
 	}
 	downHdr.WithTargetID(executor)
-	h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
+	_ = h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
 }
 
 func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req setReq, origin uint32) {
@@ -477,7 +485,6 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 		return
 	}
 	h.mu.Lock()
-	h.flows[req.FlowID] = req
 	base := h.baseDir
 	h.mu.Unlock()
 
@@ -491,10 +498,13 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 		return
 	}
 	raw, _ := json.MarshalIndent(req, "", "  ")
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := writeFileAtomic(path, raw, 0o644); err != nil {
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "write failed", FlowID: req.FlowID})
 		return
 	}
+	h.mu.Lock()
+	h.flows[req.FlowID] = req
+	h.mu.Unlock()
 	h.restartScheduler(req.FlowID)
 	h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID})
 }
@@ -587,7 +597,7 @@ func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr c
 			return
 		}
 		upHdr.WithTargetID(parentNode)
-		h.sendToConn(ctx, parent, upHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
+		_ = h.sendToConn(ctx, parent, upHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
 		return
 	}
 
@@ -605,7 +615,7 @@ func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr c
 			return
 		}
 		childHdr.WithTargetID(nextNode)
-		h.sendToConn(ctx, originConn, childHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
+		_ = h.sendToConn(ctx, originConn, childHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
 		return
 	}
 
@@ -620,7 +630,7 @@ func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr c
 		return
 	}
 	downHdr.WithTargetID(executor)
-	h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
+	_ = h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
 }
 
 func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req deleteReq, origin uint32) {
@@ -636,12 +646,6 @@ func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req
 		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: flowID})
 		return
 	}
-	delete(h.flows, flowID)
-	if old := h.schedulers[flowID]; old != nil {
-		close(old.stop)
-		delete(h.schedulers, flowID)
-	}
-	h.cancelRunsLocked(flowID, runCancelMsgFlowDeleted)
 	base := h.baseDir
 	h.mu.Unlock()
 
@@ -658,6 +662,14 @@ func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req
 			return
 		}
 	}
+	h.mu.Lock()
+	delete(h.flows, flowID)
+	if old := h.schedulers[flowID]; old != nil {
+		close(old.stop)
+		delete(h.schedulers, flowID)
+	}
+	h.cancelRunsLocked(flowID, runCancelMsgFlowDeleted)
+	h.mu.Unlock()
 	h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: flowID})
 }
 
@@ -695,7 +707,10 @@ func (h *Handler) handleRun(ctx context.Context, conn core.IConnection, hdr core
 	req.ExecutorNode = executor
 
 	if executor != local {
-		h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionRun, Data: mustJSON(req)}, func() {})
+		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionRun, Data: mustJSON(req)}, func() {})
+		if code != 0 {
+			h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: code, Msg: msgText, FlowID: req.FlowID})
+		}
 		return
 	}
 
@@ -756,7 +771,17 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 	req.OriginNode = origin
 	req.ExecutorNode = executor
 	if executor != local {
-		h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionStatus, Data: mustJSON(req)}, func() {})
+		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionStatus, Data: mustJSON(req)}, func() {})
+		if code != 0 {
+			h.sendStatusResp(ctx, hdr, statusResp{
+				ReqID:        req.ReqID,
+				Code:         code,
+				Msg:          msgText,
+				ExecutorNode: executor,
+				FlowID:       req.FlowID,
+				RunID:        req.RunID,
+			})
+		}
 		return
 	}
 
@@ -765,17 +790,7 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 	if req.RunID != "" {
 		state = h.runs[req.RunID]
 	} else {
-		// 取最新一次 run（按 start 排序）
-		var latest *runState
-		for _, r := range h.runs {
-			if r == nil || r.flowID != req.FlowID {
-				continue
-			}
-			if latest == nil || r.start.After(latest.start) {
-				latest = r
-			}
-		}
-		state = latest
+		state = h.latestRunStateLocked(req.FlowID)
 	}
 	h.mu.Unlock()
 	if state == nil {
@@ -832,7 +847,10 @@ func (h *Handler) handleList(ctx context.Context, conn core.IConnection, hdr cor
 	req.OriginNode = origin
 	req.ExecutorNode = executor
 	if executor != local {
-		h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionList, Data: mustJSON(req)}, func() {})
+		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionList, Data: mustJSON(req)}, func() {})
+		if code != 0 {
+			h.sendListResp(ctx, hdr, listResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor})
+		}
 		return
 	}
 	h.mu.Lock()
@@ -843,16 +861,7 @@ func (h *Handler) handleList(ctx context.Context, conn core.IConnection, hdr cor
 			continue
 		}
 		sum := flowSummary{FlowID: id, Name: strings.TrimSpace(f.Name), EveryMs: f.Trigger.EveryMs}
-		// latest run for this flow
-		var latest *runState
-		for _, r := range h.runs {
-			if r == nil || r.flowID != id {
-				continue
-			}
-			if latest == nil || r.start.After(latest.start) {
-				latest = r
-			}
-		}
+		latest := h.latestRunStateLocked(id)
 		if latest != nil {
 			latest.mu.Lock()
 			sum.LastRunID = latest.runID
@@ -904,7 +913,10 @@ func (h *Handler) handleGet(ctx context.Context, conn core.IConnection, hdr core
 	req.OriginNode = origin
 	req.ExecutorNode = executor
 	if executor != local {
-		h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionGet, Data: mustJSON(req)}, func() {})
+		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionGet, Data: mustJSON(req)}, func() {})
+		if code != 0 {
+			h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor, FlowID: req.FlowID})
+		}
 		return
 	}
 	h.mu.Lock()
@@ -917,71 +929,94 @@ func (h *Handler) handleGet(ctx context.Context, conn core.IConnection, hdr core
 	h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: executor, FlowID: f.FlowID, Name: f.Name, Trigger: f.Trigger, Graph: f.Graph})
 }
 
-func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer, conn core.IConnection, hdr core.IHeader, executor, origin uint32, msg message, localFn func()) {
+func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer, conn core.IConnection, hdr core.IHeader, executor, origin uint32, msg message, localFn func()) (bool, int, string) {
 	if srv == nil || conn == nil || hdr == nil || executor == 0 {
-		return
+		return false, 500, "invalid route"
 	}
 	local := srv.NodeID()
 	cm := srv.ConnManager()
 	if cm == nil {
-		return
+		return false, 500, "no conn manager"
 	}
 	// 来自父节点：信任父，直接向下转交到 executor（或本地）。
 	if isParentConn(conn) {
 		if executor == local && localFn != nil {
 			localFn()
-			return
+			return true, 0, ""
 		}
-		h.forwardDown(ctx, srv, hdr, msg, executor)
-		return
+		execConn, ok := cm.GetByNode(executor)
+		if !ok || execConn == nil || isParentConn(execConn) {
+			return false, 404, "not found"
+		}
+		downHdr, ok := header.CloneToTCPForForward(hdr)
+		if !ok {
+			h.log.Warn("drop flow frame due to hop_limit", "target", executor, "source", hdr.SourceID())
+			return false, 500, "hop limit exceeded"
+		}
+		downHdr.WithTargetID(executor)
+		if err := h.sendToConn(ctx, execConn, downHdr, payloadFrom(msg)); err != nil {
+			h.log.Warn("forward flow frame failed", "target", executor, "source", hdr.SourceID(), "err", err)
+			return false, 500, "forward failed"
+		}
+		return true, 0, ""
 	}
 	if executor == local {
 		if localFn != nil {
 			localFn()
 		}
-		return
+		return true, 0, ""
 	}
 	execConn, ok := cm.GetByNode(executor)
 	if !ok || execConn == nil || isParentConn(execConn) {
 		parent := findParentConn(cm)
 		if parent == nil {
-			return
+			return false, 404, "not found"
 		}
 		parentNode := connNodeID(parent)
 		if parentNode == 0 {
-			return
+			return false, 500, "invalid parent route"
 		}
 		upHdr, ok := header.CloneToTCPForForward(hdr)
 		if !ok {
 			h.log.Warn("drop flow frame due to hop_limit", "target", parentNode, "source", hdr.SourceID())
-			return
+			return false, 500, "hop limit exceeded"
 		}
 		upHdr.WithTargetID(parentNode)
-		h.sendToConn(ctx, parent, upHdr, payloadFrom(msg))
-		return
+		if err := h.sendToConn(ctx, parent, upHdr, payloadFrom(msg)); err != nil {
+			h.log.Warn("forward flow frame failed", "target", parentNode, "source", hdr.SourceID(), "err", err)
+			return false, 500, "forward failed"
+		}
+		return true, 0, ""
 	}
 	originConn, ok2 := cm.GetByNode(origin)
 	if ok2 && originConn != nil && originConn.ID() == execConn.ID() {
 		nextNode := connNodeID(originConn)
 		if nextNode == 0 {
-			return
+			return false, 500, "invalid route"
 		}
 		childHdr, ok := header.CloneToTCPForForward(hdr)
 		if !ok {
 			h.log.Warn("drop flow frame due to hop_limit", "target", nextNode, "source", hdr.SourceID())
-			return
+			return false, 500, "hop limit exceeded"
 		}
 		childHdr.WithTargetID(nextNode)
-		h.sendToConn(ctx, originConn, childHdr, payloadFrom(msg))
-		return
+		if err := h.sendToConn(ctx, originConn, childHdr, payloadFrom(msg)); err != nil {
+			h.log.Warn("forward flow frame failed", "target", nextNode, "source", hdr.SourceID(), "err", err)
+			return false, 500, "forward failed"
+		}
+		return true, 0, ""
 	}
 	downHdr, ok := header.CloneToTCPForForward(hdr)
 	if !ok {
 		h.log.Warn("drop flow frame due to hop_limit", "target", executor, "source", hdr.SourceID())
-		return
+		return false, 500, "hop limit exceeded"
 	}
 	downHdr.WithTargetID(executor)
-	h.sendToConn(ctx, execConn, downHdr, payloadFrom(msg))
+	if err := h.sendToConn(ctx, execConn, downHdr, payloadFrom(msg)); err != nil {
+		h.log.Warn("forward flow frame failed", "target", executor, "source", hdr.SourceID(), "err", err)
+		return false, 500, "forward failed"
+	}
+	return true, 0, ""
 }
 
 func (h *Handler) sendListResp(ctx context.Context, hdr core.IHeader, resp listResp) {
@@ -1021,6 +1056,7 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer h.pruneRuns(flow.FlowID)
 	order, err := topoOrder(flow.Graph)
 	state.mu.Lock()
 	if ctx.Err() != nil {
@@ -1428,7 +1464,10 @@ func (h *Handler) forwardDown(ctx context.Context, srv core.IServer, hdr core.IH
 		return false
 	}
 	fwdHdr.WithTargetID(target)
-	_ = srv.Send(ctx, next.ID(), fwdHdr, body)
+	if err := h.sendToConn(ctx, next, fwdHdr, body); err != nil {
+		h.log.Warn("forward flow frame failed", "target", target, "source", hdr.SourceID(), "err", err)
+		return false
+	}
 	return true
 }
 
@@ -1488,16 +1527,165 @@ func connNodeID(c core.IConnection) uint32 {
 	return 0
 }
 
-func (h *Handler) sendToConn(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
+func (h *Handler) sendToConn(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) error {
 	if conn == nil || hdr == nil || len(payload) == 0 {
-		return
+		return errors.New("invalid frame")
 	}
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
-		_ = conn.SendWithHeader(hdr, payload, header.HeaderTcpCodec{})
+		return conn.SendWithHeader(hdr, payload, header.HeaderTcpCodec{})
+	}
+	return srv.Send(ctx, conn.ID(), hdr, payload)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		_ = tmp.Close()
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	_ = tmp.Chmod(perm)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	backupPath := path + ".bak"
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Remove(backupPath)
+		if err := os.Rename(path, backupPath); err != nil {
+			return err
+		}
+		if err := os.Rename(tmpPath, path); err != nil {
+			_ = os.Rename(backupPath, path)
+			return err
+		}
+		cleanupTmp = false
+		_ = os.Remove(backupPath)
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanupTmp = false
+	return nil
+}
+
+func isTerminalRunStatus(status string) bool {
+	switch status {
+	case "succeeded", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) retainedRunLimit() int {
+	if h.maxRetainedRuns <= 0 {
+		return defaultMaxRetainedRuns
+	}
+	return h.maxRetainedRuns
+}
+
+func (h *Handler) recordRunLocked(state *runState) {
+	if state == nil || strings.TrimSpace(state.flowID) == "" || strings.TrimSpace(state.runID) == "" {
 		return
 	}
-	_ = srv.Send(ctx, conn.ID(), hdr, payload)
+	h.runs[state.runID] = state
+	h.runOrderByFlow[state.flowID] = append(h.runOrderByFlow[state.flowID], state.runID)
+}
+
+func (h *Handler) latestRunStateLocked(flowID string) *runState {
+	ids := h.runOrderByFlow[flowID]
+	for i := len(ids) - 1; i >= 0; i-- {
+		if st := h.runs[ids[i]]; st != nil {
+			return st
+		}
+	}
+	return nil
+}
+
+func (h *Handler) hasActiveRunLocked(flowID string) bool {
+	ids := h.runOrderByFlow[flowID]
+	for i := len(ids) - 1; i >= 0; i-- {
+		st := h.runs[ids[i]]
+		if st == nil {
+			continue
+		}
+		st.mu.Lock()
+		status := st.status
+		st.mu.Unlock()
+		if status == "queued" || status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) pruneRuns(flowID string) {
+	h.mu.Lock()
+	h.pruneRunsLocked(flowID)
+	h.mu.Unlock()
+}
+
+func (h *Handler) pruneRunsLocked(flowID string) {
+	ids := h.runOrderByFlow[flowID]
+	if len(ids) == 0 {
+		delete(h.runOrderByFlow, flowID)
+		return
+	}
+
+	limit := h.retainedRunLimit()
+	terminalKept := 0
+	kept := make([]string, 0, len(ids))
+
+	for i := len(ids) - 1; i >= 0; i-- {
+		runID := ids[i]
+		st := h.runs[runID]
+		if st == nil {
+			continue
+		}
+		st.mu.Lock()
+		status := st.status
+		st.mu.Unlock()
+
+		if !isTerminalRunStatus(status) {
+			kept = append(kept, runID)
+			continue
+		}
+		if terminalKept < limit {
+			kept = append(kept, runID)
+			terminalKept++
+			continue
+		}
+		delete(h.runs, runID)
+	}
+
+	if len(kept) == 0 {
+		delete(h.runOrderByFlow, flowID)
+		return
+	}
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	h.runOrderByFlow[flowID] = kept
 }
 
 func validateGraph(g graph) error {
@@ -1797,8 +1985,9 @@ func (h *Handler) tryStartScheduledRun(flowID string) {
 
 func (h *Handler) cancelRunsLocked(flowID, reason string) {
 	now := time.Now()
-	for _, st := range h.runs {
-		if st == nil || st.flowID != flowID {
+	for _, runID := range h.runOrderByFlow[flowID] {
+		st := h.runs[runID]
+		if st == nil {
 			continue
 		}
 		if st.cancel != nil {
@@ -1849,7 +2038,7 @@ func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
 		cancel: cancel,
 	}
 	h.mu.Lock()
-	h.runs[runID] = state
+	h.recordRunLocked(state)
 	h.mu.Unlock()
 	go h.executeFlow(runCtx, flow, state)
 	return runID
@@ -1866,17 +2055,9 @@ func (h *Handler) tryStartRun(flowID string) {
 		h.mu.Unlock()
 		return
 	}
-	// 判断是否已有 running
-	for _, r := range h.runs {
-		if r != nil && r.flowID == flowID {
-			r.mu.Lock()
-			st := r.status
-			r.mu.Unlock()
-			if st == "running" || st == "queued" {
-				h.mu.Unlock()
-				return
-			}
-		}
+	if h.hasActiveRunLocked(flowID) {
+		h.mu.Unlock()
+		return
 	}
 	runID := newUUID()
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -1888,7 +2069,7 @@ func (h *Handler) tryStartRun(flowID string) {
 		start:  time.Now(),
 		cancel: cancel,
 	}
-	h.runs[runID] = state
+	h.recordRunLocked(state)
 	h.mu.Unlock()
 	go h.executeFlow(runCtx, flow, state)
 }
