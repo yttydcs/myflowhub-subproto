@@ -195,10 +195,11 @@ func (h *Handler) invokeCapabilityRun(_ context.Context, args json.RawMessage) (
 	if err := json.Unmarshal(args, &req); err != nil {
 		return nil, errors.New("invalid flow::run args")
 	}
-	req.FlowID = strings.TrimSpace(req.FlowID)
-	if req.FlowID == "" {
-		return nil, errors.New("flow_id required")
+	validFlowID, err := validateFlowID(req.FlowID)
+	if err != nil {
+		return nil, err
 	}
+	req.FlowID = validFlowID
 
 	h.mu.Lock()
 	flow, ok := h.flows[req.FlowID]
@@ -348,12 +349,17 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 		return
 	}
 	req.ReqID = strings.TrimSpace(req.ReqID)
-	req.FlowID = strings.TrimSpace(req.FlowID)
+	validFlowID, err := validateFlowID(req.FlowID)
 	normalizeTrigger(&req.Trigger)
-	if req.ReqID == "" || req.FlowID == "" {
-		h.sendSetResp(ctx, hdr, 400, "invalid set", req.FlowID)
+	if req.ReqID == "" {
+		h.sendSetResp(ctx, hdr, 400, "invalid set", "")
 		return
 	}
+	if err != nil {
+		h.sendSetResp(ctx, hdr, 400, err.Error(), "")
+		return
+	}
+	req.FlowID = validFlowID
 	if err := validateTrigger(req.Trigger); err != nil {
 		h.sendSetResp(ctx, hdr, 400, err.Error(), req.FlowID)
 		return
@@ -479,7 +485,11 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "mkdir failed", FlowID: req.FlowID})
 		return
 	}
-	path := filepath.Join(base, req.FlowID+".json")
+	path, err := flowFilePath(base, req.FlowID)
+	if err != nil {
+		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: ""})
+		return
+	}
 	raw, _ := json.MarshalIndent(req, "", "  ")
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "write failed", FlowID: req.FlowID})
@@ -496,11 +506,16 @@ func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr c
 		return
 	}
 	req.ReqID = strings.TrimSpace(req.ReqID)
-	req.FlowID = strings.TrimSpace(req.FlowID)
-	if req.ReqID == "" || req.FlowID == "" {
-		h.sendDeleteResp(ctx, hdr, deleteResp{ReqID: req.ReqID, Code: 400, Msg: "invalid delete", FlowID: req.FlowID})
+	validFlowID, err := validateFlowID(req.FlowID)
+	if req.ReqID == "" {
+		h.sendDeleteResp(ctx, hdr, deleteResp{ReqID: req.ReqID, Code: 400, Msg: "invalid delete"})
 		return
 	}
+	if err != nil {
+		h.sendDeleteResp(ctx, hdr, deleteResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	req.FlowID = validFlowID
 
 	srv := core.ServerFromContext(ctx)
 	if srv == nil || hdr == nil || conn == nil {
@@ -609,9 +624,9 @@ func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr c
 }
 
 func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req deleteReq, origin uint32) {
-	flowID := strings.TrimSpace(req.FlowID)
-	if flowID == "" {
-		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 400, Msg: "invalid delete"})
+	flowID, err := validateFlowID(req.FlowID)
+	if err != nil {
+		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
 		return
 	}
 
@@ -632,7 +647,11 @@ func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req
 
 	base = strings.TrimSpace(base)
 	if base != "" {
-		path := filepath.Join(base, flowID+".json")
+		path, err := flowFilePath(base, flowID)
+		if err != nil {
+			h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+			return
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			h.log.Warn("flow delete remove file failed", "flow_id", flowID, "path", path, "err", err)
 			h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "delete file failed", FlowID: flowID})
@@ -649,11 +668,16 @@ func (h *Handler) handleRun(ctx context.Context, conn core.IConnection, hdr core
 		return
 	}
 	req.ReqID = strings.TrimSpace(req.ReqID)
-	req.FlowID = strings.TrimSpace(req.FlowID)
-	if req.ReqID == "" || req.FlowID == "" {
+	validFlowID, err := validateFlowID(req.FlowID)
+	if req.ReqID == "" {
 		h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: 400, Msg: "invalid run"})
 		return
 	}
+	if err != nil {
+		h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	req.FlowID = validFlowID
 	srv := h.getServer(ctx)
 	if srv == nil || hdr == nil || conn == nil {
 		return
@@ -705,12 +729,17 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 		return
 	}
 	req.ReqID = strings.TrimSpace(req.ReqID)
-	req.FlowID = strings.TrimSpace(req.FlowID)
+	validFlowID, err := validateFlowID(req.FlowID)
 	req.RunID = strings.TrimSpace(req.RunID)
-	if req.ReqID == "" || req.FlowID == "" {
+	if req.ReqID == "" {
 		h.sendStatusResp(ctx, hdr, statusResp{ReqID: req.ReqID, Code: 400, Msg: "invalid status"})
 		return
 	}
+	if err != nil {
+		h.sendStatusResp(ctx, hdr, statusResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	req.FlowID = validFlowID
 	srv := h.getServer(ctx)
 	if srv == nil || hdr == nil || conn == nil {
 		return
@@ -849,11 +878,16 @@ func (h *Handler) handleGet(ctx context.Context, conn core.IConnection, hdr core
 		return
 	}
 	req.ReqID = strings.TrimSpace(req.ReqID)
-	req.FlowID = strings.TrimSpace(req.FlowID)
-	if req.ReqID == "" || req.FlowID == "" {
+	validFlowID, err := validateFlowID(req.FlowID)
+	if req.ReqID == "" {
 		h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: 400, Msg: "invalid get"})
 		return
 	}
+	if err != nil {
+		h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	req.FlowID = validFlowID
 	srv := h.getServer(ctx)
 	if srv == nil || hdr == nil || conn == nil {
 		return
@@ -1125,6 +1159,8 @@ type legacyExecSpec struct {
 	Args   json.RawMessage `json:"args,omitempty"`
 }
 
+// Runtime compatibility is intentionally broader than set validation:
+// new writes are call-only, but historical local/exec payloads can still run.
 func decodeNodeCallSpec(n node) (callSpec, error) {
 	kind := strings.ToLower(strings.TrimSpace(n.Kind))
 	switch kind {
@@ -1575,11 +1611,12 @@ func (h *Handler) loadFlowsFromDisk() {
 		if err := json.Unmarshal(raw, &req); err != nil {
 			continue
 		}
-		req.FlowID = strings.TrimSpace(req.FlowID)
-		normalizeTrigger(&req.Trigger)
-		if req.FlowID == "" {
+		validFlowID, err := validateFlowID(req.FlowID)
+		if err != nil {
 			continue
 		}
+		req.FlowID = validFlowID
+		normalizeTrigger(&req.Trigger)
 		if validateTrigger(req.Trigger) != nil {
 			continue
 		}

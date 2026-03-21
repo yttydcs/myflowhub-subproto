@@ -144,7 +144,7 @@ func TestFlowResp_InheritsMsgIDTraceID_SetResp(t *testing.T) {
 		WithTraceID(444)
 
 	h := NewHandler(nil)
-	h.sendSetResp(ctx, reqHdr, 400, "invalid set", "flow-1")
+	h.sendSetResp(ctx, reqHdr, 400, "invalid set", "123e4567-e89b-12d3-a456-426614174004")
 
 	if len(srv.sends) != 1 {
 		t.Fatalf("expected 1 send, got %d", len(srv.sends))
