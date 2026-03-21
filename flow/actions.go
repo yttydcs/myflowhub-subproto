@@ -8,6 +8,7 @@ import (
 func registerActions(h *Handler) []core.SubProcessAction {
 	return []core.SubProcessAction{
 		kit.NewAction(actionSet, h.handleSet),
+		kit.NewAction(actionDelete, h.handleDelete),
 		kit.NewAction(actionRun, h.handleRun),
 		kit.NewAction(actionStatus, h.handleStatus),
 		kit.NewAction(actionList, h.handleList),

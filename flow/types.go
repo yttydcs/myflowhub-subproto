@@ -8,6 +8,8 @@ const SubProtoFlow uint8 = protocol.SubProtoFlow
 const (
 	actionSet        = protocol.ActionSet
 	actionSetResp    = protocol.ActionSetResp
+	actionDelete     = protocol.ActionDelete
+	actionDeleteResp = protocol.ActionDeleteResp
 	actionRun        = protocol.ActionRun
 	actionRunResp    = protocol.ActionRunResp
 	actionStatus     = protocol.ActionStatus
@@ -18,7 +20,10 @@ const (
 	actionGetResp    = protocol.ActionGetResp
 )
 
-const permFlowSet = protocol.PermFlowSet
+const (
+	permFlowSet    = protocol.PermFlowSet
+	permFlowDelete = protocol.PermFlowDelete
+)
 
 type message = protocol.Message
 type trigger = protocol.Trigger
@@ -27,6 +32,8 @@ type node = protocol.Node
 type edge = protocol.Edge
 type setReq = protocol.SetReq
 type setResp = protocol.SetResp
+type deleteReq = protocol.DeleteReq
+type deleteResp = protocol.DeleteResp
 type runReq = protocol.RunReq
 type runResp = protocol.RunResp
 type statusReq = protocol.StatusReq

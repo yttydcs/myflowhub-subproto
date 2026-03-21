@@ -64,6 +64,9 @@ type runState struct {
 	nodes  map[string]nodeStatus
 	start  time.Time
 	end    time.Time
+
+	cancel       context.CancelFunc
+	cancelReason string
 }
 
 const (
@@ -77,6 +80,8 @@ const (
 
 	capabilityProviderFlow = "flow"
 	capabilityMethodRun    = "flow::run"
+
+	runCancelMsgFlowDeleted = "interrupted by flow delete"
 )
 
 type topicPublishEvent struct {
@@ -484,6 +489,159 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 	h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID})
 }
 
+func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+	var req deleteReq
+	if err := json.Unmarshal(data, &req); err != nil {
+		h.sendDeleteResp(ctx, hdr, deleteResp{ReqID: req.ReqID, Code: 400, Msg: "invalid delete"})
+		return
+	}
+	req.ReqID = strings.TrimSpace(req.ReqID)
+	req.FlowID = strings.TrimSpace(req.FlowID)
+	if req.ReqID == "" || req.FlowID == "" {
+		h.sendDeleteResp(ctx, hdr, deleteResp{ReqID: req.ReqID, Code: 400, Msg: "invalid delete", FlowID: req.FlowID})
+		return
+	}
+
+	srv := core.ServerFromContext(ctx)
+	if srv == nil || hdr == nil || conn == nil {
+		// interval 触发可能不在带 server 的 ctx 中
+		h.mu.Lock()
+		srv = h.srv
+		h.mu.Unlock()
+		if srv == nil || hdr == nil || conn == nil {
+			return
+		}
+	}
+	local := srv.NodeID()
+	cm := srv.ConnManager()
+	if cm == nil {
+		return
+	}
+
+	origin := req.OriginNode
+	if origin == 0 {
+		origin = hdr.SourceID()
+	}
+	executor := req.ExecutorNode
+	if executor == 0 {
+		executor = local
+	}
+	req.OriginNode = origin
+	req.ExecutorNode = executor
+
+	// 来自父节点：下游无条件信任父节点，视为已授权，直接将请求转交到 executor（或本地删除）。
+	if isParentConn(conn) {
+		if executor == local {
+			h.applyDeleteLocal(ctx, hdr, req, origin)
+			return
+		}
+		if !h.forwardDown(ctx, srv, hdr, message{Action: actionDelete, Data: mustJSON(req)}, executor) {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "forward failed", FlowID: req.FlowID})
+		}
+		return
+	}
+
+	// executor 为本节点：本节点即 LCA+executor，执行权限判定并本地删除。
+	if executor == local {
+		if !h.hasPermission(origin, permFlowDelete) {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", FlowID: req.FlowID})
+			return
+		}
+		h.applyDeleteLocal(ctx, hdr, req, origin)
+		return
+	}
+
+	// executor 在本子树内？
+	execConn, ok := cm.GetByNode(executor)
+	if !ok || execConn == nil || isParentConn(execConn) {
+		// 不在本子树：上送父节点（若无父则 not found）
+		parent := findParentConn(cm)
+		if parent == nil {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: req.FlowID})
+			return
+		}
+		parentNode := connNodeID(parent)
+		if parentNode == 0 {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "invalid parent route", FlowID: req.FlowID})
+			return
+		}
+		// 上送必须让父节点进入 handler：TargetID=父节点自身
+		upHdr, ok := header.CloneToTCPForForward(hdr)
+		if !ok {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
+			return
+		}
+		upHdr.WithTargetID(parentNode)
+		h.sendToConn(ctx, parent, upHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
+		return
+	}
+
+	// 判定 origin 与 executor 是否处于同一 child 分支；若是则下送该 child 继续裁决（本节点非 LCA）。
+	originConn, ok2 := cm.GetByNode(origin)
+	if ok2 && originConn != nil && originConn.ID() == execConn.ID() {
+		nextNode := connNodeID(originConn)
+		if nextNode == 0 {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "invalid route", FlowID: req.FlowID})
+			return
+		}
+		childHdr, ok := header.CloneToTCPForForward(hdr)
+		if !ok {
+			h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
+			return
+		}
+		childHdr.WithTargetID(nextNode)
+		h.sendToConn(ctx, originConn, childHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
+		return
+	}
+
+	// 本节点为 LCA：判定权限后，向下转发到 executor（转发即同意）。
+	if !h.hasPermission(origin, permFlowDelete) {
+		h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 403, Msg: "permission denied", FlowID: req.FlowID})
+		return
+	}
+	downHdr, ok := header.CloneToTCPForForward(hdr)
+	if !ok {
+		h.sendDeleteRespToNode(ctx, hdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "hop limit exceeded", FlowID: req.FlowID})
+		return
+	}
+	downHdr.WithTargetID(executor)
+	h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionDelete, Data: mustJSON(req)}))
+}
+
+func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req deleteReq, origin uint32) {
+	flowID := strings.TrimSpace(req.FlowID)
+	if flowID == "" {
+		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 400, Msg: "invalid delete"})
+		return
+	}
+
+	h.mu.Lock()
+	if _, ok := h.flows[flowID]; !ok {
+		h.mu.Unlock()
+		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: flowID})
+		return
+	}
+	delete(h.flows, flowID)
+	if old := h.schedulers[flowID]; old != nil {
+		close(old.stop)
+		delete(h.schedulers, flowID)
+	}
+	h.cancelRunsLocked(flowID, runCancelMsgFlowDeleted)
+	base := h.baseDir
+	h.mu.Unlock()
+
+	base = strings.TrimSpace(base)
+	if base != "" {
+		path := filepath.Join(base, flowID+".json")
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			h.log.Warn("flow delete remove file failed", "flow_id", flowID, "path", path, "err", err)
+			h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "delete file failed", FlowID: flowID})
+			return
+		}
+	}
+	h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: flowID})
+}
+
 func (h *Handler) handleRun(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req runReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -610,6 +768,9 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 		RunID:        state.runID,
 		Status:       state.status,
 		Nodes:        nodes,
+	}
+	if state.status == "cancelled" && strings.TrimSpace(state.cancelReason) != "" {
+		resp.Msg = state.cancelReason
 	}
 	state.mu.Unlock()
 	h.sendStatusResp(ctx, hdr, resp)
@@ -823,8 +984,20 @@ func (h *Handler) getServer(ctx context.Context) core.IServer {
 }
 
 func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	order, err := topoOrder(flow.Graph)
 	state.mu.Lock()
+	if ctx.Err() != nil {
+		state.status = "cancelled"
+		state.end = time.Now()
+		if state.cancelReason == "" {
+			state.cancelReason = runCancelMsgFlowDeleted
+		}
+		state.mu.Unlock()
+		return
+	}
 	if err != nil {
 		state.status = "failed"
 		state.end = time.Now()
@@ -835,6 +1008,10 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 	state.mu.Unlock()
 
 	for _, n := range order {
+		if ctx.Err() != nil {
+			markRunCancelled(state, runCancelMsgFlowDeleted)
+			return
+		}
 		if n == nil {
 			continue
 		}
@@ -866,6 +1043,13 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			if lastErr == nil && lastCode == 1 {
 				break
 			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if ctx.Err() != nil {
+			markRunCancelled(state, runCancelMsgFlowDeleted)
+			return
 		}
 		ns := nodeStatus{ID: id}
 		if lastErr == nil && lastCode == 1 {
@@ -883,6 +1067,16 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			}
 		}
 		state.mu.Lock()
+		if state.status == "cancelled" {
+			if state.end.IsZero() {
+				state.end = time.Now()
+			}
+			if state.cancelReason == "" {
+				state.cancelReason = runCancelMsgFlowDeleted
+			}
+			state.mu.Unlock()
+			return
+		}
 		state.nodes[id] = ns
 		state.mu.Unlock()
 
@@ -894,7 +1088,21 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			return
 		}
 	}
+	if ctx.Err() != nil {
+		markRunCancelled(state, runCancelMsgFlowDeleted)
+		return
+	}
 	state.mu.Lock()
+	if state.status == "cancelled" {
+		if state.end.IsZero() {
+			state.end = time.Now()
+		}
+		if state.cancelReason == "" {
+			state.cancelReason = runCancelMsgFlowDeleted
+		}
+		state.mu.Unlock()
+		return
+	}
 	state.status = "succeeded"
 	state.end = time.Now()
 	state.mu.Unlock()
@@ -1085,6 +1293,21 @@ func (h *Handler) sendSetResp(ctx context.Context, hdr core.IHeader, code int, m
 
 func (h *Handler) sendSetRespToNode(ctx context.Context, reqHdr core.IHeader, target uint32, resp setResp) {
 	h.sendCtrlToNodeWithReqHdr(ctx, reqHdr, target, message{Action: actionSetResp, Data: mustJSON(resp)})
+}
+
+func (h *Handler) sendDeleteResp(ctx context.Context, hdr core.IHeader, resp deleteResp) {
+	target := uint32(0)
+	if hdr != nil {
+		target = hdr.SourceID()
+	}
+	if target == 0 {
+		return
+	}
+	h.sendDeleteRespToNode(ctx, hdr, target, resp)
+}
+
+func (h *Handler) sendDeleteRespToNode(ctx context.Context, reqHdr core.IHeader, target uint32, resp deleteResp) {
+	h.sendCtrlToNodeWithReqHdr(ctx, reqHdr, target, message{Action: actionDeleteResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendRunResp(ctx context.Context, hdr core.IHeader, resp runResp) {
@@ -1535,10 +1758,50 @@ func (h *Handler) tryStartScheduledRun(flowID string) {
 	h.tryStartRun(flowID)
 }
 
+func (h *Handler) cancelRunsLocked(flowID, reason string) {
+	now := time.Now()
+	for _, st := range h.runs {
+		if st == nil || st.flowID != flowID {
+			continue
+		}
+		if st.cancel != nil {
+			st.cancel()
+		}
+		st.mu.Lock()
+		switch st.status {
+		case "queued", "running":
+			st.status = "cancelled"
+			st.end = now
+			if reason != "" {
+				st.cancelReason = reason
+			}
+		}
+		st.mu.Unlock()
+	}
+}
+
+func markRunCancelled(state *runState, reason string) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	if state.status == "succeeded" || state.status == "failed" {
+		state.mu.Unlock()
+		return
+	}
+	state.status = "cancelled"
+	state.end = time.Now()
+	if reason != "" {
+		state.cancelReason = reason
+	}
+	state.mu.Unlock()
+}
+
 func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runCtx, cancel := context.WithCancel(ctx)
 	runID := newUUID()
 	state := &runState{
 		flowID: flow.FlowID,
@@ -1546,11 +1809,12 @@ func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
 		status: "queued",
 		nodes:  make(map[string]nodeStatus),
 		start:  time.Now(),
+		cancel: cancel,
 	}
 	h.mu.Lock()
 	h.runs[runID] = state
 	h.mu.Unlock()
-	go h.executeFlow(ctx, flow, state)
+	go h.executeFlow(runCtx, flow, state)
 	return runID
 }
 
@@ -1578,16 +1842,18 @@ func (h *Handler) tryStartRun(flowID string) {
 		}
 	}
 	runID := newUUID()
+	runCtx, cancel := context.WithCancel(context.Background())
 	state := &runState{
 		flowID: flow.FlowID,
 		runID:  runID,
 		status: "queued",
 		nodes:  make(map[string]nodeStatus),
 		start:  time.Now(),
+		cancel: cancel,
 	}
 	h.runs[runID] = state
 	h.mu.Unlock()
-	go h.executeFlow(context.Background(), flow, state)
+	go h.executeFlow(runCtx, flow, state)
 }
 
 func newUUID() string {
