@@ -41,7 +41,7 @@ func TestFlowCallNodeFallsBackToCapabilityRegistry(t *testing.T) {
 		Spec: json.RawMessage(`{"method":"test::cap","args":{"x":1}}`),
 	}
 
-	code, runErr := h.executeNode(ctx, setReq{}, n)
+	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
 	if runErr != nil {
 		t.Fatalf("execute local capability err=%v", runErr)
 	}
@@ -75,7 +75,7 @@ func TestFlowCallNodeMethodTakesPrecedenceOverCapabilityRegistry(t *testing.T) {
 		Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"world"}}`),
 	}
 
-	code, runErr := h.executeNode(ctx, setReq{}, n)
+	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
 	if runErr != nil {
 		t.Fatalf("execute local debug err=%v", runErr)
 	}
@@ -99,7 +99,7 @@ func TestFlowLegacyLocalNodeStillSupportedAtRuntime(t *testing.T) {
 		Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"legacy"}}`),
 	}
 
-	code, runErr := h.executeNode(ctx, setReq{}, n)
+	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
 	if runErr != nil {
 		t.Fatalf("execute legacy local err=%v", runErr)
 	}
@@ -162,7 +162,7 @@ func TestFlowCallNodeRemoteUsesExecCall(t *testing.T) {
 		Kind: "call",
 		Spec: json.RawMessage(`{"target":2,"method":"debug::echo","args":{"remote":true}}`),
 	}
-	code, runErr := h.executeNode(ctx, setReq{}, n)
+	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
 	if runErr != nil {
 		t.Fatalf("execute remote call err=%v", runErr)
 	}

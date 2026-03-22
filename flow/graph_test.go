@@ -8,8 +8,8 @@ import (
 func TestValidateGraphOK(t *testing.T) {
 	g := graph{
 		Nodes: []node{
-			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo","args":{"x":1}}`)},
-			{ID: "B", Kind: "call", Spec: []byte(`{"target":2,"method":"debug::echo","args":{"x":2}}`)},
+			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo","args_template":{"payload":{"x":1}}}`)},
+			{ID: "B", Kind: "compose", Spec: []byte(`{"template":{"joined":{}},"inputs":[{"to":"/joined/value","source":{"kind":"node_result","node_id":"A","path":"/payload/x"},"required":true}]}`)},
 		},
 		Edges: []edge{{From: "A", To: "B"}},
 	}
@@ -48,7 +48,42 @@ func TestValidateGraphRejectsLegacyKind(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected err, got nil")
 	}
-	if !strings.Contains(err.Error(), "kind must be call") {
+	if !strings.Contains(err.Error(), "kind must be call or compose") {
+		t.Fatalf("unexpected err=%v", err)
+	}
+}
+
+func TestValidateGraphRejectsUnknownBindingNode(t *testing.T) {
+	g := graph{
+		Nodes: []node{
+			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo"}`)},
+			{ID: "B", Kind: "compose", Spec: []byte(`{"template":{},"inputs":[{"to":"/value","source":{"kind":"node_result","node_id":"C"}}]}`)},
+		},
+		Edges: []edge{{From: "A", To: "B"}},
+	}
+	err := validateGraph(g)
+	if err == nil {
+		t.Fatalf("expected err, got nil")
+	}
+	if !strings.Contains(err.Error(), "references unknown node C") {
+		t.Fatalf("unexpected err=%v", err)
+	}
+}
+
+func TestValidateGraphRejectsNonAncestorBinding(t *testing.T) {
+	g := graph{
+		Nodes: []node{
+			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo"}`)},
+			{ID: "B", Kind: "call", Spec: []byte(`{"method":"debug::echo"}`)},
+			{ID: "C", Kind: "compose", Spec: []byte(`{"template":{},"inputs":[{"to":"/value","source":{"kind":"node_result","node_id":"B"}}]}`)},
+		},
+		Edges: []edge{{From: "A", To: "C"}},
+	}
+	err := validateGraph(g)
+	if err == nil {
+		t.Fatalf("expected err, got nil")
+	}
+	if !strings.Contains(err.Error(), "must reference ancestor") {
 		t.Fatalf("unexpected err=%v", err)
 	}
 }

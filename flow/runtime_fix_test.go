@@ -78,12 +78,12 @@ func TestFlowDeleteFileFailureKeepsState(t *testing.T) {
 	cancelled := false
 	runID := "run-active"
 	run := &runState{
-		flowID: flowID,
-		runID:  runID,
-		status: "running",
-		nodes:  map[string]nodeStatus{},
-		start:  time.Now(),
-		cancel: func() { cancelled = true },
+		flowID:  flowID,
+		runID:   runID,
+		status:  "running",
+		start:   time.Now(),
+		cancel:  func() { cancelled = true },
+		runtime: newRunContext(flowID, runID, 1, nil),
 	}
 	h.flows[flowID] = setReq{FlowID: flowID, Graph: simpleGraph("debug::echo")}
 	h.schedulers[flowID] = oldScheduler

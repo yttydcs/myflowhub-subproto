@@ -63,12 +63,12 @@ type runState struct {
 	flowID string
 	runID  string
 	status string
-	nodes  map[string]nodeStatus
 	start  time.Time
 	end    time.Time
 
 	cancel       context.CancelFunc
 	cancelReason string
+	runtime      runContext
 }
 
 const (
@@ -84,6 +84,9 @@ const (
 	capabilityMethodRun    = "flow::run"
 
 	runCancelMsgFlowDeleted = "interrupted by flow delete"
+
+	varChangeOpChanged = "changed"
+	varChangeOpDeleted = "deleted"
 )
 
 type topicPublishEvent struct {
@@ -798,11 +801,7 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 		return
 	}
 	state.mu.Lock()
-	nodes := make([]nodeStatus, 0, len(state.nodes))
-	for _, st := range state.nodes {
-		nodes = append(nodes, st)
-	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	nodes := state.snapshotNodeStatusesLocked()
 	resp := statusResp{
 		ReqID:        req.ReqID,
 		Code:         1,
@@ -1089,6 +1088,9 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 		if id == "" {
 			continue
 		}
+		state.mu.Lock()
+		state.setNodeRuntimeLocked(id, nodeRuntimeData{Status: "running"})
+		state.mu.Unlock()
 		retry := 1
 		if n.Retry != nil {
 			retry = *n.Retry
@@ -1106,9 +1108,10 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 
 		var lastErr error
 		var lastCode int
+		var lastResult json.RawMessage
 		for attempt := 0; attempt <= retry; attempt++ {
 			nodeCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
-			lastCode, lastErr = h.executeNode(nodeCtx, flow, *n)
+			lastCode, lastResult, lastErr = h.executeNode(nodeCtx, flow, state, *n)
 			cancel()
 			if lastErr == nil && lastCode == 1 {
 				break
@@ -1121,19 +1124,20 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			markRunCancelled(state, runCancelMsgFlowDeleted)
 			return
 		}
-		ns := nodeStatus{ID: id}
+		rt := nodeRuntimeData{}
 		if lastErr == nil && lastCode == 1 {
-			ns.Status = "succeeded"
-			ns.Code = 1
+			rt.Status = "succeeded"
+			rt.Code = 1
+			rt.Result = lastResult
 		} else {
-			ns.Status = "failed"
+			rt.Status = "failed"
 			if lastCode != 0 {
-				ns.Code = lastCode
+				rt.Code = lastCode
 			} else {
-				ns.Code = 500
+				rt.Code = 500
 			}
 			if lastErr != nil {
-				ns.Msg = lastErr.Error()
+				rt.Msg = lastErr.Error()
 			}
 		}
 		state.mu.Lock()
@@ -1147,10 +1151,10 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			state.mu.Unlock()
 			return
 		}
-		state.nodes[id] = ns
+		state.setNodeRuntimeLocked(id, rt)
 		state.mu.Unlock()
 
-		if ns.Status != "succeeded" && !n.AllowFail {
+		if rt.Status != "succeeded" && !n.AllowFail {
 			state.mu.Lock()
 			state.status = "failed"
 			state.end = time.Now()
@@ -1179,9 +1183,11 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 }
 
 type callSpec struct {
-	Target uint32          `json:"target,omitempty"`
-	Method string          `json:"method"`
-	Args   json.RawMessage `json:"args,omitempty"`
+	Target       uint32          `json:"target,omitempty"`
+	Method       string          `json:"method"`
+	Args         json.RawMessage `json:"args,omitempty"`
+	ArgsTemplate json.RawMessage `json:"args_template,omitempty"`
+	Inputs       []inputBinding  `json:"inputs,omitempty"`
 }
 
 type legacyLocalSpec struct {
@@ -1235,7 +1241,7 @@ func decodeNodeCallSpec(n node) (callSpec, error) {
 	}
 }
 
-func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code int, err error) {
+func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n node) (code int, result json.RawMessage, err error) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
 		h.mu.Lock()
@@ -1243,40 +1249,63 @@ func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code in
 		h.mu.Unlock()
 	}
 	if srv == nil {
-		return 500, errors.New("no server")
+		return 500, nil, errors.New("no server")
+	}
+	if strings.EqualFold(strings.TrimSpace(n.Kind), "compose") {
+		spec, specErr := decodeNodeComposeSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		out, materializeErr := materializeComposeResult(strings.TrimSpace(n.ID), spec, state)
+		if materializeErr != nil {
+			return 400, nil, materializeErr
+		}
+		return 1, out, nil
 	}
 	local := srv.NodeID()
 	spec, specErr := decodeNodeCallSpec(n)
 	if specErr != nil {
-		return 400, specErr
+		return 400, nil, specErr
+	}
+	args, materializeErr := materializeCallArgs(strings.TrimSpace(n.ID), spec, state)
+	if materializeErr != nil {
+		return 400, nil, materializeErr
 	}
 	method := spec.Method
 	target := spec.Target
 	if target == 0 || target == local {
 		if fn := h.localMethods[method]; fn != nil {
-			_, err := fn(ctx, spec.Args)
+			res, err := fn(ctx, args)
 			if err != nil {
 				if ctx.Err() == context.DeadlineExceeded {
-					return 408, err
+					return 408, nil, err
 				}
-				return 500, err
+				return 500, nil, err
 			}
-			return 1, nil
+			normalized, normalizeErr := normalizeNodeResult(res)
+			if normalizeErr != nil {
+				return 500, nil, normalizeErr
+			}
+			return 1, normalized, nil
 		}
 		if h.capRegistry != nil {
 			_, invoke, ok := h.capRegistry.Lookup(method, "")
 			if ok && invoke != nil {
-				_, err := invoke(ctx, spec.Args)
+				res, err := invoke(ctx, args)
 				if err != nil {
 					if ctx.Err() == context.DeadlineExceeded {
-						return 408, err
+						return 408, nil, err
 					}
-					return 500, err
+					return 500, nil, err
 				}
-				return 1, nil
+				normalized, normalizeErr := normalizeNodeResult(res)
+				if normalizeErr != nil {
+					return 500, nil, normalizeErr
+				}
+				return 1, normalized, nil
 			}
 		}
-		return 404, fmt.Errorf("call method not found: %s", method)
+		return 404, nil, fmt.Errorf("call method not found: %s", method)
 	}
 
 	timeoutMs := 3000
@@ -1292,23 +1321,31 @@ func (h *Handler) executeNode(ctx context.Context, flow setReq, n node) (code in
 		ExecutorNode: local,
 		TargetNode:   target,
 		Method:       method,
-		Args:         spec.Args,
+		Args:         args,
 		TimeoutMs:    timeoutMs,
 	}
 	if err := h.sendExecCall(ctx, srv, call); err != nil {
-		return 500, err
+		return 500, nil, err
 	}
 	select {
 	case resp, ok := <-ch:
 		if !ok {
-			return 500, errors.New("exec response closed")
+			return 500, nil, errors.New("exec response closed")
 		}
 		if resp.Code != 1 {
-			return resp.Code, errors.New(strings.TrimSpace(resp.Msg))
+			msg := strings.TrimSpace(resp.Msg)
+			if msg == "" {
+				msg = "call failed"
+			}
+			return resp.Code, nil, errors.New(msg)
 		}
-		return 1, nil
+		normalized, normalizeErr := normalizeNodeResult(resp.Result)
+		if normalizeErr != nil {
+			return 500, nil, normalizeErr
+		}
+		return 1, normalized, nil
 	case <-ctx.Done():
-		return 408, errors.New("timeout")
+		return 408, nil, errors.New("timeout")
 	}
 }
 
@@ -1701,29 +1738,38 @@ func validateGraph(g graph) error {
 		if seen[id] {
 			return fmt.Errorf("duplicate node id: %s", id)
 		}
-		if err := validateSetNodeKindAndSpec(id, n); err != nil {
-			return err
-		}
 		seen[id] = true
 	}
-	// 基础拓扑校验（无环）
-	_, err := topoOrder(g)
-	return err
-}
-
-func validateSetNodeKindAndSpec(nodeID string, n node) error {
-	kind := strings.ToLower(strings.TrimSpace(n.Kind))
-	if kind != "call" {
-		return fmt.Errorf("node %s kind must be call", nodeID)
+	idx, err := buildGraphIndex(g)
+	if err != nil {
+		return err
 	}
-	var spec callSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
-		return fmt.Errorf("node %s invalid call spec", nodeID)
-	}
-	if strings.TrimSpace(spec.Method) == "" {
-		return fmt.Errorf("node %s call method required", nodeID)
+	for _, n := range g.Nodes {
+		if err := validateSetNodeKindAndSpec(strings.TrimSpace(n.ID), n, idx); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func validateSetNodeKindAndSpec(nodeID string, n node, idx *graphIndex) error {
+	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	switch kind {
+	case "call":
+		var spec callSpec
+		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+			return fmt.Errorf("node %s invalid call spec", nodeID)
+		}
+		return validateCallSpecForSet(nodeID, spec, idx)
+	case "compose":
+		var spec composeSpec
+		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+			return fmt.Errorf("node %s invalid compose spec", nodeID)
+		}
+		return validateComposeSpecForSet(nodeID, spec, idx)
+	default:
+		return fmt.Errorf("node %s kind must be call or compose", nodeID)
+	}
 }
 
 func topoOrder(g graph) ([]*node, error) {
@@ -1830,10 +1876,10 @@ func (h *Handler) ensureTriggerSubscriptions(srv core.IServer) {
 			h.handleTopicPublishEvent(eventModeReceived, evt.Data)
 		})
 		eb.Subscribe("varstore.changed", func(_ context.Context, evt eventbus.Event) {
-			h.handleVarChangedEvent(evt.Data)
+			h.handleVarChangedEvent(varChangeOpChanged, evt.Data)
 		})
 		eb.Subscribe("varstore.deleted", func(_ context.Context, evt eventbus.Event) {
-			h.handleVarChangedEvent(evt.Data)
+			h.handleVarChangedEvent(varChangeOpDeleted, evt.Data)
 		})
 	})
 }
@@ -1873,12 +1919,13 @@ func (h *Handler) handleTopicPublishEvent(mode string, data any) {
 		}
 		return true
 	})
+	triggerCtx := buildTopicTriggerContext(mode, ev)
 	for _, id := range ids {
-		h.tryStartRun(id)
+		h.tryStartRunWithTrigger(id, triggerCtx)
 	}
 }
 
-func (h *Handler) handleVarChangedEvent(data any) {
+func (h *Handler) handleVarChangedEvent(op string, data any) {
 	var ev varChangedEvent
 	if !decodeEventData(data, &ev) {
 		return
@@ -1900,8 +1947,9 @@ func (h *Handler) handleVarChangedEvent(data any) {
 		}
 		return true
 	})
+	triggerCtx := buildVarChangedTriggerContext(op, ev)
 	for _, id := range ids {
-		h.tryStartRun(id)
+		h.tryStartRunWithTrigger(id, triggerCtx)
 	}
 }
 
@@ -1980,7 +2028,7 @@ func (h *Handler) restartScheduler(flowID string) {
 }
 
 func (h *Handler) tryStartScheduledRun(flowID string) {
-	h.tryStartRun(flowID)
+	h.tryStartRunWithTrigger(flowID, buildIntervalTriggerContext(time.Now()))
 }
 
 func (h *Handler) cancelRunsLocked(flowID, reason string) {
@@ -2024,18 +2072,26 @@ func markRunCancelled(state *runState, reason string) {
 }
 
 func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
+	return h.enqueueRunWithTrigger(ctx, flow, nil)
+}
+
+func (h *Handler) enqueueRunWithTrigger(ctx context.Context, flow setReq, triggerCtx json.RawMessage) string {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	runID := newUUID()
+	executorNode := uint32(0)
+	if srv := h.getServer(ctx); srv != nil {
+		executorNode = srv.NodeID()
+	}
 	state := &runState{
-		flowID: flow.FlowID,
-		runID:  runID,
-		status: "queued",
-		nodes:  make(map[string]nodeStatus),
-		start:  time.Now(),
-		cancel: cancel,
+		flowID:  flow.FlowID,
+		runID:   runID,
+		status:  "queued",
+		start:   time.Now(),
+		cancel:  cancel,
+		runtime: newRunContext(flow.FlowID, runID, executorNode, triggerCtx),
 	}
 	h.mu.Lock()
 	h.recordRunLocked(state)
@@ -2045,6 +2101,10 @@ func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
 }
 
 func (h *Handler) tryStartRun(flowID string) {
+	h.tryStartRunWithTrigger(flowID, nil)
+}
+
+func (h *Handler) tryStartRunWithTrigger(flowID string, triggerCtx json.RawMessage) {
 	flowID = strings.TrimSpace(flowID)
 	if flowID == "" {
 		return
@@ -2061,13 +2121,17 @@ func (h *Handler) tryStartRun(flowID string) {
 	}
 	runID := newUUID()
 	runCtx, cancel := context.WithCancel(context.Background())
+	executorNode := uint32(0)
+	if h.srv != nil {
+		executorNode = h.srv.NodeID()
+	}
 	state := &runState{
-		flowID: flow.FlowID,
-		runID:  runID,
-		status: "queued",
-		nodes:  make(map[string]nodeStatus),
-		start:  time.Now(),
-		cancel: cancel,
+		flowID:  flow.FlowID,
+		runID:   runID,
+		status:  "queued",
+		start:   time.Now(),
+		cancel:  cancel,
+		runtime: newRunContext(flow.FlowID, runID, executorNode, triggerCtx),
 	}
 	h.recordRunLocked(state)
 	h.mu.Unlock()
