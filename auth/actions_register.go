@@ -36,6 +36,7 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 		send(ctx, conn, hdr, actionRegisterResp, respData{Code: 400, Msg: "invalid register data"})
 		return
 	}
+	req.DisplayName = normalizeDisplayName(req.DisplayName)
 	req.NodePub = req.PubKey
 	var pubRaw []byte
 	if strings.TrimSpace(req.PubKey) != "" {
@@ -55,14 +56,15 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 			h.addTrustedNode(nodeID, req.PubKey)
 		}
 		send(ctx, conn, hdr, actionAssistRegisterResp, respData{
-			Code:     1,
-			Msg:      "ok",
-			DeviceID: req.DeviceID,
-			NodeID:   nodeID,
-			Role:     h.resolveRole(nodeID),
-			Perms:    h.resolvePerms(nodeID),
-			PubKey:   req.PubKey,
-			NodePub:  req.PubKey,
+			Code:        1,
+			Msg:         "ok",
+			DeviceID:    req.DeviceID,
+			NodeID:      nodeID,
+			Role:        h.resolveRole(nodeID),
+			Perms:       h.resolvePerms(nodeID),
+			PubKey:      req.PubKey,
+			NodePub:     req.PubKey,
+			DisplayName: req.DisplayName,
 		})
 		h.persistState()
 		return
@@ -77,19 +79,21 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 	nodeID := h.ensureNodeID(req.DeviceID)
 	h.saveBinding(ctx, conn, req.DeviceID, nodeID, pubRaw)
 	h.applyHubID(ctx, conn, localNodeID(ctx))
+	applyDisplayNameMeta(conn, req.DisplayName)
 	if strings.TrimSpace(req.PubKey) != "" {
 		h.addTrustedNode(nodeID, req.PubKey)
 	}
 	send(ctx, conn, hdr, actionRegisterResp, respData{
-		Code:     1,
-		Msg:      "ok",
-		DeviceID: req.DeviceID,
-		NodeID:   nodeID,
-		HubID:    localNodeID(ctx),
-		Role:     h.resolveRole(nodeID),
-		Perms:    h.resolvePerms(nodeID),
-		PubKey:   req.PubKey,
-		NodePub:  req.PubKey,
+		Code:        1,
+		Msg:         "ok",
+		DeviceID:    req.DeviceID,
+		NodeID:      nodeID,
+		HubID:       localNodeID(ctx),
+		Role:        h.resolveRole(nodeID),
+		Perms:       h.resolvePerms(nodeID),
+		PubKey:      req.PubKey,
+		NodePub:     req.PubKey,
+		DisplayName: req.DisplayName,
 	})
 	h.persistState()
 }
@@ -120,6 +124,9 @@ func (h *LoginHandler) handleRegisterResp(ctx context.Context, data json.RawMess
 		h.saveBinding(ctx, c, resp.DeviceID, resp.NodeID, pubRaw)
 		h.applyRolePerms(resp.DeviceID, resp.NodeID, resp.Role, resp.Perms, c)
 		h.applyHubID(ctx, c, resp.HubID)
+		if resp.Code == 1 {
+			applyDisplayNameMeta(c, resp.DisplayName)
+		}
 		if strings.TrimSpace(resp.NodePub) != "" {
 			h.addTrustedNode(resp.NodeID, resp.NodePub)
 		}

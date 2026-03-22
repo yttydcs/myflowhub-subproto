@@ -3,9 +3,15 @@ package auth
 import (
 	"bytes"
 	"context"
+	"strings"
 
 	core "github.com/yttydcs/myflowhub-core"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
+)
+
+const (
+	metaDisplayNameKey     = "display_name"
+	metaNodeDisplayNameKey = "node.display_name"
 )
 
 func (h *LoginHandler) saveBinding(ctx context.Context, conn core.IConnection, deviceID string, nodeID uint32, pubKey []byte) {
@@ -115,6 +121,41 @@ func (h *LoginHandler) sourceMatches(conn core.IConnection, hdr core.IHeader) bo
 		return false
 	}
 	return hdr.SourceID() == nid
+}
+
+func normalizeDisplayName(displayName string) string {
+	return strings.TrimSpace(displayName)
+}
+
+func connectionNodeID(conn core.IConnection) uint32 {
+	if conn == nil {
+		return 0
+	}
+	meta, ok := conn.GetMeta("nodeID")
+	if !ok {
+		return 0
+	}
+	nodeID, ok := meta.(uint32)
+	if !ok {
+		return 0
+	}
+	return nodeID
+}
+
+func isSameConnectionNode(conn core.IConnection, nodeID uint32) bool {
+	return nodeID != 0 && connectionNodeID(conn) == nodeID
+}
+
+func applyDisplayNameMeta(conn core.IConnection, displayName string) {
+	if conn == nil {
+		return
+	}
+	trimmed := normalizeDisplayName(displayName)
+	if trimmed == "" {
+		return
+	}
+	conn.SetMeta(metaDisplayNameKey, trimmed)
+	conn.SetMeta(metaNodeDisplayNameKey, trimmed)
 }
 
 func (h *LoginHandler) upsertTrustedAndBindingPubKey(nodeID uint32, pubKey []byte) (trustedUpdated, bindingUpdated bool) {
