@@ -37,6 +37,7 @@ func (h *LoginHandler) handleLoginResp(ctx context.Context, data json.RawMessage
 			h.saveBinding(ctx, c, resp.DeviceID, resp.NodeID, pubRaw)
 			h.applyRolePerms(resp.DeviceID, resp.NodeID, resp.Role, resp.Perms, c)
 			h.applyHubID(ctx, c, resp.HubID)
+			applyDisplayNameMeta(c, resp.DisplayName)
 			if strings.TrimSpace(resp.PubKey) != "" {
 				h.addTrustedNode(resp.NodeID, resp.PubKey)
 			}
@@ -59,6 +60,7 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		send(ctx, conn, hdr, actionLoginResp, respData{Code: 400, Msg: "invalid login data"})
 		return
 	}
+	req.DisplayName = normalizeDisplayName(req.DisplayName)
 	if assisted {
 		rec, ok := h.lookup(req.DeviceID)
 		if (!ok || len(rec.PubKey) == 0) && h.selectAuthority(ctx) != nil {
@@ -80,15 +82,19 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		if len(rec.PubKey) > 0 {
 			conn.SetMeta("pubkey", rec.PubKey)
 		}
+		if isSameConnectionNode(conn, rec.NodeID) {
+			applyDisplayNameMeta(conn, req.DisplayName)
+		}
 		h.addRouteIndex(ctx, rec.NodeID, conn)
 		h.sendResp(ctx, conn, hdr, actionAssistLoginResp, respData{
-			Code:     1,
-			Msg:      "ok",
-			DeviceID: req.DeviceID,
-			NodeID:   rec.NodeID,
-			HubID:    localNodeID(ctx),
-			PubKey:   base64.StdEncoding.EncodeToString(rec.PubKey),
-			NodePub:  base64.StdEncoding.EncodeToString(rec.PubKey),
+			Code:        1,
+			Msg:         "ok",
+			DeviceID:    req.DeviceID,
+			NodeID:      rec.NodeID,
+			HubID:       localNodeID(ctx),
+			PubKey:      base64.StdEncoding.EncodeToString(rec.PubKey),
+			NodePub:     base64.StdEncoding.EncodeToString(rec.PubKey),
+			DisplayName: req.DisplayName,
 		})
 		go h.sendUpLogin(ctx, conn, req.DeviceID, rec.NodeID, rec.PubKey, req.Sig, req.Alg, req.TS, req.Nonce)
 		return
@@ -109,7 +115,17 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		if valid {
 			h.saveBinding(ctx, conn, req.DeviceID, rec.NodeID, rec.PubKey)
 			h.applyHubID(ctx, conn, localNodeID(ctx))
-			send(ctx, conn, hdr, actionLoginResp, respData{Code: 1, Msg: "ok", DeviceID: req.DeviceID, NodeID: rec.NodeID, HubID: localNodeID(ctx), PubKey: base64.StdEncoding.EncodeToString(rec.PubKey), NodePub: base64.StdEncoding.EncodeToString(rec.PubKey)})
+			applyDisplayNameMeta(conn, req.DisplayName)
+			send(ctx, conn, hdr, actionLoginResp, respData{
+				Code:        1,
+				Msg:         "ok",
+				DeviceID:    req.DeviceID,
+				NodeID:      rec.NodeID,
+				HubID:       localNodeID(ctx),
+				PubKey:      base64.StdEncoding.EncodeToString(rec.PubKey),
+				NodePub:     base64.StdEncoding.EncodeToString(rec.PubKey),
+				DisplayName: req.DisplayName,
+			})
 			go h.sendUpLogin(ctx, conn, req.DeviceID, rec.NodeID, rec.PubKey, req.Sig, req.Alg, req.TS, req.Nonce)
 			return
 		}

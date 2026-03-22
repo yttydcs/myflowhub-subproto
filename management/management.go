@@ -61,6 +61,7 @@ func (h *ManagementHandler) OnReceive(ctx context.Context, conn core.IConnection
 		return
 	}
 	h.ensureCapabilities(srv)
+	h.refreshDirectChildDisplayName(conn, hdr, frame)
 	if hdr != nil && hdr.TargetID() != 0 && hdr.TargetID() != srv.NodeID() {
 		forwarded, code, msg := h.forwardCmdByHeaderTarget(ctx, conn, hdr, payload)
 		if forwarded {
@@ -260,4 +261,38 @@ func findParentConn(cm core.IConnectionManager) core.IConnection {
 		return true
 	})
 	return parent
+}
+
+func (h *ManagementHandler) refreshDirectChildDisplayName(conn core.IConnection, hdr core.IHeader, frame mgmtMessage) {
+	if conn == nil || hdr == nil || !strings.EqualFold(strings.TrimSpace(frame.Action), actionConfigSetResp) {
+		return
+	}
+	var resp configResp
+	if err := json.Unmarshal(frame.Data, &resp); err != nil {
+		return
+	}
+	if resp.Code != 1 || strings.TrimSpace(resp.Key) != configKeyNodeDisplayName {
+		return
+	}
+	if !isDirectChildSource(conn, hdr) {
+		return
+	}
+	displayName := strings.TrimSpace(resp.Value)
+	conn.SetMeta("display_name", displayName)
+	conn.SetMeta(configKeyNodeDisplayName, displayName)
+}
+
+func isDirectChildSource(conn core.IConnection, hdr core.IHeader) bool {
+	if conn == nil || hdr == nil || isParentConn(conn) {
+		return false
+	}
+	meta, ok := conn.GetMeta("nodeID")
+	if !ok {
+		return false
+	}
+	nodeID, ok := meta.(uint32)
+	if !ok || nodeID == 0 {
+		return false
+	}
+	return hdr.SourceID() == nodeID
 }
