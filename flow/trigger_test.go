@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -90,6 +91,10 @@ func TestHandleTopicPublishEvent_StartsMatchingFlows(t *testing.T) {
 	if got["interval"] {
 		t.Fatalf("interval flow should not be started by topic event")
 	}
+	state := latestRunStateForTest(t, h, "event-name")
+	assertJSONPointerValue(t, state.runtime.Trigger, "/type", triggerTypeEvent)
+	assertJSONPointerValue(t, state.runtime.Trigger, "/mode", eventModePublish)
+	assertJSONPointerValue(t, state.runtime.Trigger, "/name", "alarm")
 }
 
 func TestHandleTopicReceivedEvent_StartsReceivedModeFlows(t *testing.T) {
@@ -120,7 +125,7 @@ func TestHandleVarChangedEvent_StartsMatchingFlows(t *testing.T) {
 	h.flows["both"] = makeTestFlow("both", trigger{Type: "var_changed", VarOwner: 2, VarName: "k1"})
 	h.flows["mismatch"] = makeTestFlow("mismatch", trigger{Type: "var_changed", VarOwner: 3})
 
-	h.handleVarChangedEvent(varChangedEvent{Owner: 2, Name: "k1"})
+	h.handleVarChangedEvent(varChangeOpChanged, varChangedEvent{Owner: 2, Name: "k1"})
 
 	waitRunCount(t, h, 4)
 	got := runFlowSet(h)
@@ -131,6 +136,28 @@ func TestHandleVarChangedEvent_StartsMatchingFlows(t *testing.T) {
 	}
 	if got["mismatch"] {
 		t.Fatalf("mismatch flow should not be started by var_changed event")
+	}
+	state := latestRunStateForTest(t, h, "any")
+	assertJSONPointerValue(t, state.runtime.Trigger, "/type", triggerTypeVarChanged)
+	assertJSONPointerValue(t, state.runtime.Trigger, "/op", varChangeOpChanged)
+	assertJSONPointerValue(t, state.runtime.Trigger, "/owner", float64(2))
+}
+
+func TestTryStartScheduledRun_PopulatesIntervalTriggerContext(t *testing.T) {
+	h := NewHandler(nil)
+	h.flows["interval"] = makeTestFlow("interval", trigger{Type: "interval", EveryMs: 1000})
+
+	h.tryStartScheduledRun("interval")
+
+	waitRunCount(t, h, 1)
+	state := latestRunStateForTest(t, h, "interval")
+	assertJSONPointerValue(t, state.runtime.Trigger, "/type", triggerTypeInterval)
+	value, found, err := readJSONSourceValue(state.runtime.Trigger, "/triggered_at")
+	if err != nil || !found {
+		t.Fatalf("expected interval trigger timestamp, found=%v err=%v", found, err)
+	}
+	if _, ok := value.(string); !ok {
+		t.Fatalf("unexpected triggered_at value=%T %v", value, value)
 	}
 }
 
@@ -179,4 +206,29 @@ func runFlowSet(h *Handler) map[string]bool {
 		out[st.flowID] = true
 	}
 	return out
+}
+
+func latestRunStateForTest(t *testing.T, h *Handler, flowID string) *runState {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.latestRunStateLocked(flowID)
+	if state == nil {
+		t.Fatalf("expected latest run state for flow %s", flowID)
+	}
+	return state
+}
+
+func assertJSONPointerValue(t *testing.T, raw json.RawMessage, pointer string, want any) {
+	t.Helper()
+	got, found, err := readJSONSourceValue(raw, pointer)
+	if err != nil {
+		t.Fatalf("pointer %s err=%v", pointer, err)
+	}
+	if !found {
+		t.Fatalf("pointer %s not found", pointer)
+	}
+	if got != want {
+		t.Fatalf("pointer %s want=%v got=%v", pointer, want, got)
+	}
 }
