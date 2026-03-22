@@ -1,11 +1,13 @@
 package management
 
 import (
+	"context"
 	"io"
 	"net"
 	"testing"
 
 	core "github.com/yttydcs/myflowhub-core"
+	coreconfig "github.com/yttydcs/myflowhub-core/config"
 )
 
 type nopPipe struct{}
@@ -120,5 +122,53 @@ func TestEnumerateDirectNodes_ChildrenOnlySkipsParent(t *testing.T) {
 	}
 	if got[0].NodeID != 6 {
 		t.Fatalf("expected node_id=6, got %d", got[0].NodeID)
+	}
+}
+
+func TestEnumerateDirectNodes_DisplayNameOmitsBlankMeta(t *testing.T) {
+	child := newStubConn("child")
+	child.SetMeta(core.MetaRoleKey, core.RoleChild)
+	child.SetMeta("nodeID", uint32(6))
+	child.SetMeta("display_name", "   ")
+
+	got := enumerateDirectNodes(&stubConnManager{conns: []core.IConnection{child}})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(got))
+	}
+	if got[0].DisplayName != "" {
+		t.Fatalf("expected blank display_name to be omitted, got %q", got[0].DisplayName)
+	}
+}
+
+func TestListSubtreeResponse_IncludesLocalDisplayName(t *testing.T) {
+	child := newStubConn("child")
+	child.SetMeta(core.MetaRoleKey, core.RoleChild)
+	child.SetMeta("nodeID", uint32(6))
+
+	srv := &recordServer{
+		nodeID: 1,
+		cfg: coreconfig.NewMap(map[string]string{
+			configKeyNodeDisplayName: "  Hub Alpha  ",
+		}),
+		cm: &stubConnManager{conns: []core.IConnection{child}},
+	}
+	act := registerListSubtreeActions(NewHandler(nil))
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	act.Handle(ctx, newStubConn("caller"), newRequestHeader(9, 1), nil)
+
+	if len(srv.sent) != 1 {
+		t.Fatalf("expected 1 response frame, got %d", len(srv.sent))
+	}
+	resp := decodeMgmtResponse[listSubtreeResp](t, srv.sent[0].payload)
+	if len(resp.Nodes) != 2 {
+		t.Fatalf("expected 2 nodes (child+self), got %+v", resp.Nodes)
+	}
+	self := resp.Nodes[1]
+	if self.NodeID != 1 {
+		t.Fatalf("expected self node_id=1, got %+v", self)
+	}
+	if self.DisplayName != "Hub Alpha" {
+		t.Fatalf("expected trimmed display_name, got %+v", self)
 	}
 }

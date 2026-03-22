@@ -132,7 +132,7 @@ func (h *ManagementHandler) invokeCapabilityNodeInfo(ctx context.Context, _ json
 	if srv == nil {
 		return nil, errors.New("no server context")
 	}
-	items := collectNodeInfoItems(srv.NodeID())
+	items := collectNodeInfoItems(srv.NodeID(), srv.Config())
 	raw, _ := json.Marshal(map[string]any{
 		"items": items,
 	})
