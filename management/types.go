@@ -27,12 +27,31 @@ type nodeEchoResp = protocol.NodeEchoResp
 type nodeInfoReq = protocol.NodeInfoReq
 type nodeInfoResp = protocol.NodeInfoResp
 type listNodesReq = protocol.ListNodesReq
-type listNodesResp = protocol.ListNodesResp
 type configGetReq = protocol.ConfigGetReq
 type configSetReq = protocol.ConfigSetReq
 type configResp = protocol.ConfigResp
 type configListReq = protocol.ConfigListReq
 type configListResp = protocol.ConfigListResp
-type nodeInfo = protocol.NodeInfo
 type listSubtreeReq = protocol.ListSubtreeReq
-type listSubtreeResp = protocol.ListSubtreeResp
+
+// NOTE:
+// `display_name` is rolled out in Proto and SubProto in parallel. Keep the
+// local wire struct compatible so management can expose the field before the
+// workspace switches to the new Proto module.
+type nodeInfo struct {
+	NodeID      uint32 `json:"node_id"`
+	HasChildren bool   `json:"has_children,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type listNodesResp struct {
+	Code  int        `json:"code"`
+	Msg   string     `json:"msg,omitempty"`
+	Nodes []nodeInfo `json:"nodes,omitempty"`
+}
+
+type listSubtreeResp struct {
+	Code  int        `json:"code"`
+	Msg   string     `json:"msg,omitempty"`
+	Nodes []nodeInfo `json:"nodes,omitempty"`
+}

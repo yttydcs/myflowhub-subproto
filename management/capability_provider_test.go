@@ -33,7 +33,9 @@ func (s *capServer) Send(context.Context, string, core.IHeader, []byte) error {
 }
 
 func TestManagementCapabilitiesListNodesNodeInfo(t *testing.T) {
-	cfg := coreconfig.NewMap(map[string]string{})
+	cfg := coreconfig.NewMap(map[string]string{
+		configKeyNodeDisplayName: "Hub Alpha",
+	})
 	cm := &stubConnManager{}
 	child := newStubConn("child")
 	child.SetMeta("nodeID", uint32(6))
@@ -79,5 +81,8 @@ func TestManagementCapabilitiesListNodesNodeInfo(t *testing.T) {
 	}
 	if infoResp["items"]["node_id"] != "1" {
 		t.Fatalf("unexpected node_info result=%v", infoResp)
+	}
+	if infoResp["items"]["display_name"] != "Hub Alpha" {
+		t.Fatalf("expected display_name in node_info result, got %v", infoResp)
 	}
 }

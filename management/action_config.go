@@ -3,12 +3,16 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	core "github.com/yttydcs/myflowhub-core"
-	coreconfig "github.com/yttydcs/myflowhub-core/config"
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
 )
+
+type persistentConfigSetter interface {
+	SetPersistent(string, string) error
+}
 
 func registerConfigGetActions(h *ManagementHandler) core.SubProcessAction {
 	return kit.NewAction(actionConfigGet, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
@@ -31,7 +35,7 @@ func registerConfigGetActions(h *ManagementHandler) core.SubProcessAction {
 	})
 }
 
-// config_set: 更新配置项（仅支持可写 MapConfig）
+// config_set: 优先写入持久化层；若目标配置未提供该能力，则保持旧的运行期 Set 语义。
 func registerConfigSetActions(h *ManagementHandler) core.SubProcessAction {
 	return kit.NewAction(actionConfigSet, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 		var req configSetReq
@@ -41,23 +45,15 @@ func registerConfigSetActions(h *ManagementHandler) core.SubProcessAction {
 		}
 		key := strings.TrimSpace(req.Key)
 		srv := core.ServerFromContext(ctx)
-		if srv == nil || srv.Config() == nil {
+		if srv == nil {
 			h.sendActionResp(ctx, conn, hdr, actionConfigSetResp, configResp{Code: 500, Msg: "config unavailable"})
 			return
 		}
-		cfg := srv.Config()
-		if mc, ok := cfg.(*coreconfig.MapConfig); ok && mc != nil {
-			mc.Set(key, req.Value)
-			h.sendActionResp(ctx, conn, hdr, actionConfigSetResp, configResp{Code: 1, Msg: "ok", Key: key, Value: req.Value})
+		if err := setConfigValue(srv.Config(), key, req.Value); err != nil {
+			h.sendActionResp(ctx, conn, hdr, actionConfigSetResp, configResp{Code: 500, Msg: err.Error(), Key: key, Value: req.Value})
 			return
 		}
-		// fallback: try interface with Set
-		if setter, ok := cfg.(interface{ Set(string, string) }); ok {
-			setter.Set(key, req.Value)
-			h.sendActionResp(ctx, conn, hdr, actionConfigSetResp, configResp{Code: 1, Msg: "ok", Key: key, Value: req.Value})
-			return
-		}
-		h.sendActionResp(ctx, conn, hdr, actionConfigSetResp, configResp{Code: 501, Msg: "config not writable"})
+		h.sendActionResp(ctx, conn, hdr, actionConfigSetResp, configResp{Code: 1, Msg: "ok", Key: key, Value: req.Value})
 	})
 }
 
@@ -77,4 +73,15 @@ func registerConfigListActions(h *ManagementHandler) core.SubProcessAction {
 		}
 		h.sendActionResp(ctx, conn, hdr, actionConfigListResp, configListResp{Code: 501, Msg: "config not listable"})
 	})
+}
+
+func setConfigValue(cfg core.IConfig, key, value string) error {
+	if cfg == nil {
+		return errors.New("config unavailable")
+	}
+	if setter, ok := cfg.(persistentConfigSetter); ok {
+		return setter.SetPersistent(key, value)
+	}
+	cfg.Set(key, value)
+	return nil
 }

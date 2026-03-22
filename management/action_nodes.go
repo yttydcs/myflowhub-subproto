@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	core "github.com/yttydcs/myflowhub-core"
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
@@ -27,7 +28,7 @@ func registerListSubtreeActions(h *ManagementHandler) core.SubProcessAction {
 		}
 		nodes := enumerateDirectNodes(srv.ConnManager())
 		// 包含自身
-		nodes = append(nodes, nodeInfo{NodeID: srv.NodeID(), HasChildren: len(nodes) > 0})
+		nodes = append(nodes, buildLocalNodeInfo(srv.NodeID(), len(nodes) > 0, srv.Config()))
 		h.sendActionResp(ctx, conn, hdr, actionListSubtreeResp, listSubtreeResp{Code: 1, Msg: "ok", Nodes: nodes})
 	})
 }
@@ -47,11 +48,33 @@ func enumerateDirectNodes(cm core.IConnectionManager) []nodeInfo {
 		}
 		if nidVal, ok := c.GetMeta("nodeID"); ok {
 			if nid, ok2 := nidVal.(uint32); ok2 && nid != 0 && !seen[nid] {
-				nodes = append(nodes, nodeInfo{NodeID: nid, HasChildren: false})
+				info := nodeInfo{NodeID: nid, HasChildren: false}
+				if displayName := nodeDisplayNameFromConnectionMeta(c); displayName != "" {
+					info.DisplayName = displayName
+				}
+				nodes = append(nodes, info)
 				seen[nid] = true
 			}
 		}
 		return true
 	})
 	return nodes
+}
+
+func nodeDisplayNameFromConnectionMeta(c core.IConnection) string {
+	if c == nil {
+		return ""
+	}
+	for _, key := range []string{"display_name", configKeyNodeDisplayName} {
+		val, ok := c.GetMeta(key)
+		if !ok {
+			continue
+		}
+		if s, ok := val.(string); ok {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }

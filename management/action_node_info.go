@@ -14,6 +14,8 @@ import (
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
 )
 
+const configKeyNodeDisplayName = "node.display_name"
+
 func registerNodeInfoActions(h *ManagementHandler) core.SubProcessAction {
 	return kit.NewAction(actionNodeInfo, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, _ json.RawMessage) {
 		srv := core.ServerFromContext(ctx)
@@ -22,17 +24,20 @@ func registerNodeInfoActions(h *ManagementHandler) core.SubProcessAction {
 			return
 		}
 
-		items := collectNodeInfoItems(srv.NodeID())
+		items := collectNodeInfoItems(srv.NodeID(), srv.Config())
 		h.sendActionResp(ctx, conn, hdr, actionNodeInfoResp, nodeInfoResp{Code: 1, Msg: "ok", Items: items})
 	})
 }
 
-func collectNodeInfoItems(nodeID uint32) map[string]string {
+func collectNodeInfoItems(nodeID uint32, cfg core.IConfig) map[string]string {
 	items := map[string]string{
 		"node_id":    fmt.Sprintf("%d", nodeID),
 		"app":        filepath.Base(os.Args[0]),
 		"platform":   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
 		"go_version": runtime.Version(),
+	}
+	if displayName := nodeDisplayNameFromConfig(cfg); displayName != "" {
+		items["display_name"] = displayName
 	}
 
 	if bi, ok := debug.ReadBuildInfo(); ok && bi != nil {
@@ -52,4 +57,23 @@ func collectNodeInfoItems(nodeID uint32) map[string]string {
 	}
 
 	return items
+}
+
+func buildLocalNodeInfo(nodeID uint32, hasChildren bool, cfg core.IConfig) nodeInfo {
+	info := nodeInfo{NodeID: nodeID, HasChildren: hasChildren}
+	if displayName := nodeDisplayNameFromConfig(cfg); displayName != "" {
+		info.DisplayName = displayName
+	}
+	return info
+}
+
+func nodeDisplayNameFromConfig(cfg core.IConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	val, ok := cfg.Get(configKeyNodeDisplayName)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(val)
 }
