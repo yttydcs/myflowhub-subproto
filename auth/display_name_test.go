@@ -21,8 +21,12 @@ type recordingAuthServer struct {
 }
 
 func newRecordingAuthServer(nodeID uint32, cm core.IConnectionManager) *recordingAuthServer {
+	return newRecordingAuthServerWithConfig(nodeID, cm, nil)
+}
+
+func newRecordingAuthServerWithConfig(nodeID uint32, cm core.IConnectionManager, cfg core.IConfig) *recordingAuthServer {
 	return &recordingAuthServer{
-		testServer: &testServer{nodeID: nodeID, cm: cm},
+		testServer: &testServer{nodeID: nodeID, cm: cm, cfg: cfg},
 	}
 }
 

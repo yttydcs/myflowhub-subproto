@@ -10,6 +10,19 @@ import (
 	"github.com/yttydcs/myflowhub-core/header"
 )
 
+type authorityMode uint8
+
+const (
+	authorityModeLocal authorityMode = iota
+	authorityModeRemote
+	authorityModeUnavailable
+)
+
+type authoritySelection struct {
+	mode authorityMode
+	conn core.IConnection
+}
+
 func localNodeID(ctx context.Context) uint32 {
 	if srv := core.ServerFromContext(ctx); srv != nil {
 		return srv.NodeID()
@@ -17,30 +30,85 @@ func localNodeID(ctx context.Context) uint32 {
 	return 0
 }
 
-func (h *LoginHandler) selectAuthority(ctx context.Context) core.IConnection {
+func (h *LoginHandler) resolveAuthority(ctx context.Context) authoritySelection {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
-		return nil
+		return authoritySelection{mode: authorityModeUnavailable}
 	}
-	if h.authNode == 0 && srv.Config() != nil {
-		if raw, ok := srv.Config().Get(coreconfig.KeyParentAddr); ok && raw != "" {
-			// no explicit node id, use parent conn if exists
+	explicitAuthority := h.explicitAuthorityNodeID(srv.Config())
+	if explicitAuthority != 0 {
+		if c, ok := srv.ConnManager().GetByNode(explicitAuthority); ok {
+			return authoritySelection{mode: authorityModeRemote, conn: c}
 		}
-		if raw, ok := srv.Config().Get("authority.node_id"); ok {
-			if id, err := parseUint32(raw); err == nil && id != 0 {
-				h.authNode = id
-			}
-		}
-	}
-	if h.authNode != 0 {
-		if c, ok := srv.ConnManager().GetByNode(h.authNode); ok {
-			return c
-		}
+		return authoritySelection{mode: authorityModeUnavailable}
 	}
 	if parent := h.selectAuthorityConn(ctx); parent != nil {
-		return parent
+		return authoritySelection{mode: authorityModeRemote, conn: parent}
 	}
-	return nil
+	if h.parentConfigured(srv.Config()) {
+		return authoritySelection{mode: authorityModeUnavailable}
+	}
+	return authoritySelection{mode: authorityModeLocal}
+}
+
+func (h *LoginHandler) explicitAuthorityNodeID(cfg core.IConfig) uint32 {
+	if h == nil {
+		return 0
+	}
+	if h.authNode != 0 {
+		return h.authNode
+	}
+	if cfg == nil {
+		return 0
+	}
+	if raw, ok := cfg.Get("authority.node_id"); ok {
+		if id, err := parseUint32(raw); err == nil && id != 0 {
+			h.authNode = id
+			return id
+		}
+	}
+	return 0
+}
+
+func (h *LoginHandler) parentConfigured(cfg core.IConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	rawAddr, ok := cfg.Get(coreconfig.KeyParentAddr)
+	if !ok || strings.TrimSpace(rawAddr) == "" {
+		return false
+	}
+	rawEnable, ok := cfg.Get(coreconfig.KeyParentEnable)
+	if !ok {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(rawEnable)) {
+	case "", "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s authoritySelection) local() bool {
+	return s.mode == authorityModeLocal
+}
+
+func (s authoritySelection) remote() bool {
+	return s.mode == authorityModeRemote && s.conn != nil
+}
+
+func (s authoritySelection) unavailable() bool {
+	return s.mode == authorityModeUnavailable
+}
+
+func authorityUnavailableResp(deviceID string) respData {
+	return respData{
+		Code:     4500,
+		Msg:      "authority unavailable",
+		DeviceID: strings.TrimSpace(deviceID),
+		Reason:   "authority unavailable",
+	}
 }
 
 func (h *LoginHandler) selectAuthorityConn(ctx context.Context) core.IConnection {

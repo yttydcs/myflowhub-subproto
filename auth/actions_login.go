@@ -61,13 +61,20 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		return
 	}
 	req.DisplayName = normalizeDisplayName(req.DisplayName)
+	authority := h.resolveAuthority(ctx)
 	if assisted {
 		rec, ok := h.lookup(req.DeviceID)
-		if (!ok || len(rec.PubKey) == 0) && h.selectAuthority(ctx) != nil {
-			// 向上查询公钥
-			h.setPending(req.DeviceID, conn.ID(), hdr)
-			h.forward(ctx, h.selectAuthority(ctx), actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID})
-			return
+		if !ok || len(rec.PubKey) == 0 {
+			if authority.remote() {
+				// 向上查询公钥
+				h.setPending(req.DeviceID, conn.ID(), hdr)
+				h.forward(ctx, authority.conn, actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID})
+				return
+			}
+			if authority.unavailable() {
+				h.sendResp(ctx, conn, hdr, actionAssistLoginResp, authorityUnavailableResp(req.DeviceID))
+				return
+			}
 		}
 		valid := false
 		if ok && len(rec.PubKey) > 0 && strings.EqualFold(strings.TrimSpace(req.Alg), defaultAlgES256) && strings.TrimSpace(req.Sig) != "" {
@@ -101,10 +108,16 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 	}
 	// local check
 	if rec, ok := h.lookup(req.DeviceID); ok {
-		if len(rec.PubKey) == 0 && h.selectAuthority(ctx) != nil {
-			h.setPending(req.DeviceID, conn.ID(), hdr)
-			h.forward(ctx, h.selectAuthority(ctx), actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID})
-			return
+		if len(rec.PubKey) == 0 {
+			if authority.remote() {
+				h.setPending(req.DeviceID, conn.ID(), hdr)
+				h.forward(ctx, authority.conn, actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID})
+				return
+			}
+			if authority.unavailable() {
+				send(ctx, conn, hdr, actionLoginResp, authorityUnavailableResp(req.DeviceID))
+				return
+			}
 		}
 		valid := false
 		if len(rec.PubKey) > 0 && strings.EqualFold(strings.TrimSpace(req.Alg), defaultAlgES256) && strings.TrimSpace(req.Sig) != "" {
@@ -133,10 +146,13 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		return
 	}
 	// not found locally, try authority
-	authority := h.selectAuthority(ctx)
-	if authority != nil {
+	if authority.remote() {
 		h.setPending(req.DeviceID, conn.ID(), hdr)
-		h.forward(ctx, authority, actionAssistLogin, req)
+		h.forward(ctx, authority.conn, actionAssistLogin, req)
+		return
+	}
+	if authority.unavailable() {
+		send(ctx, conn, hdr, actionLoginResp, authorityUnavailableResp(req.DeviceID))
 		return
 	}
 	send(ctx, conn, hdr, actionLoginResp, respData{Code: 4001, Msg: "invalid signature"})

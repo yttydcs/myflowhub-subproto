@@ -157,8 +157,8 @@ func (h *LoginHandler) refreshPerms(ctx context.Context, nodeIDs []uint32) {
 		h.requestPermSnapshot(ctx)
 		return
 	}
-	authority := h.selectAuthority(ctx)
-	if authority == nil {
+	authority := h.resolveAuthority(ctx)
+	if !authority.remote() {
 		return
 	}
 	seen := make(map[uint32]bool)
@@ -168,16 +168,16 @@ func (h *LoginHandler) refreshPerms(ctx context.Context, nodeIDs []uint32) {
 		}
 		seen[id] = true
 		req := permsQueryData{NodeID: id}
-		h.forward(ctx, authority, actionGetPerms, req)
+		h.forward(ctx, authority.conn, actionGetPerms, req)
 	}
 }
 
 func (h *LoginHandler) requestPermSnapshot(ctx context.Context) {
-	authority := h.selectAuthority(ctx)
-	if authority == nil {
+	authority := h.resolveAuthority(ctx)
+	if !authority.remote() {
 		return
 	}
-	h.forward(ctx, authority, actionPermsSnapshot, permission.Snapshot{})
+	h.forward(ctx, authority.conn, actionPermsSnapshot, permission.Snapshot{})
 }
 
 func (h *LoginHandler) applyPermSnapshot(ctx context.Context, snap permission.Snapshot) {
