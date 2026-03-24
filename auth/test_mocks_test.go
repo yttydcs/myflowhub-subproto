@@ -56,6 +56,7 @@ func (m *mockConnection) SendWithHeader(core.IHeader, []byte, core.IHeaderCodec)
 type testServer struct {
 	nodeID uint32
 	cm     core.IConnectionManager
+	cfg    core.IConfig
 }
 
 var _ core.IServer = (*testServer)(nil)
@@ -63,7 +64,7 @@ var _ core.IServer = (*testServer)(nil)
 func (s *testServer) Start(context.Context) error { return nil }
 func (s *testServer) Stop(context.Context) error  { return nil }
 
-func (s *testServer) Config() core.IConfig                                     { return nil }
+func (s *testServer) Config() core.IConfig                                     { return s.cfg }
 func (s *testServer) ConnManager() core.IConnectionManager                     { return s.cm }
 func (s *testServer) Process() core.IProcess                                   { return nil }
 func (s *testServer) HeaderCodec() core.IHeaderCodec                           { return nil }

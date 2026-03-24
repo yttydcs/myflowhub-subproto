@@ -193,7 +193,9 @@ func (h *LoginHandler) persistState() {
 	if h.disablePersist {
 		return
 	}
-	h.mu.RLock()
+	now := h.admissionNow()
+	h.mu.Lock()
+	h.cleanupExpiredAdmissionLocked(now)
 	bindings := make(map[string]bindingRecord, len(h.whitelist))
 	for dev, rec := range h.whitelist {
 		bindings[dev] = bindingRecord{
@@ -214,6 +216,20 @@ func (h *LoginHandler) persistState() {
 			}
 		}
 	}
-	h.mu.RUnlock()
-	saveTrustedBindings(bindings, trusted)
+	pending := make(map[string]pendingRegisterRecord, len(h.pendingRegisters))
+	for requestID, rec := range h.pendingRegisters {
+		pending[requestID] = rec
+	}
+	approved := make(map[string]approvedRegisterRecord, len(h.approvedRegisters))
+	for deviceID, rec := range h.approvedRegisters {
+		approved[deviceID] = rec
+	}
+	permits := make(map[string]registerPermitRecord, len(h.registerPermits))
+	for permit, rec := range h.registerPermits {
+		permits[permit] = rec
+	}
+	h.mu.Unlock()
+	if err := saveTrustedBindings(bindings, trusted, pending, approved, permits); err != nil && h.log != nil {
+		h.log.Warn("persist auth state failed", "err", err)
+	}
 }

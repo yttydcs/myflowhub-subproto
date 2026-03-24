@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	core "github.com/yttydcs/myflowhub-core"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
@@ -22,9 +23,13 @@ type LoginHandler struct {
 
 	nextID atomic.Uint32
 
-	mu          sync.RWMutex
-	whitelist   map[string]bindingRecord // deviceID -> record
-	pendingConn map[string]pendingInfo   // deviceID -> pending downstream info (in-flight assist)
+	mu                sync.RWMutex
+	whitelist         map[string]bindingRecord          // deviceID -> record
+	pendingConn       map[string]pendingInfo            // deviceID -> pending downstream info (in-flight assist)
+	pendingRegisters  map[string]pendingRegisterRecord  // requestID -> pending register
+	pendingByDevice   map[string]string                 // deviceID -> requestID
+	approvedRegisters map[string]approvedRegisterRecord // deviceID -> approved-but-not-finalized
+	registerPermits   map[string]registerPermitRecord   // permit -> record
 
 	authNode uint32
 
@@ -33,7 +38,11 @@ type LoginHandler struct {
 	nodePubB64  string
 	trustedNode map[uint32][]byte
 
-	disablePersist bool
+	disablePersist  bool
+	requireApproval bool
+	pendingTTL      time.Duration
+	permitTTL       time.Duration
+	now             func() time.Time
 }
 
 type pendingInfo struct {
@@ -51,9 +60,14 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 		log = slog.Default()
 	}
 	h := &LoginHandler{
-		log:         log,
-		whitelist:   make(map[string]bindingRecord),
-		pendingConn: make(map[string]pendingInfo),
+		log:               log,
+		whitelist:         make(map[string]bindingRecord),
+		pendingConn:       make(map[string]pendingInfo),
+		pendingRegisters:  make(map[string]pendingRegisterRecord),
+		pendingByDevice:   make(map[string]string),
+		approvedRegisters: make(map[string]approvedRegisterRecord),
+		registerPermits:   make(map[string]registerPermitRecord),
+		now:               time.Now,
 	}
 	if cfg != nil {
 		if v, _ := cfg.Get("auth.disable_persist"); strings.EqualFold(strings.TrimSpace(v), "true") {
@@ -67,12 +81,30 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 			h.nodePubB64 = pub
 		}
 		if !h.disablePersist {
-			if wl, trusted, maxNode := loadTrustedBindings(cfg); len(wl) > 0 || len(trusted) > 0 {
+			wl, trusted, pending, approved, permits, maxNode, err := loadTrustedBindings(cfg)
+			if err != nil {
+				h.log.Warn("load auth persisted state failed", "err", err)
+			} else {
 				if len(wl) > 0 {
 					h.whitelist = wl
 				}
 				if len(trusted) > 0 {
 					h.trustedNode = trusted
+				}
+				if len(pending) > 0 {
+					h.pendingRegisters = pending
+					h.pendingByDevice = make(map[string]string, len(pending))
+					for requestID, rec := range pending {
+						if strings.TrimSpace(rec.DeviceID) != "" {
+							h.pendingByDevice[rec.DeviceID] = requestID
+						}
+					}
+				}
+				if len(approved) > 0 {
+					h.approvedRegisters = approved
+				}
+				if len(permits) > 0 {
+					h.registerPermits = permits
 				}
 				if maxNode >= 2 {
 					h.nextID.Store(maxNode + 1)
@@ -81,6 +113,7 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 		}
 	}
 	h.loadAuthConfig(cfg)
+	h.loadAdmissionConfig(cfg)
 	if h.nextID.Load() < 2 {
 		h.nextID.Store(2)
 	}
@@ -163,6 +196,9 @@ func (h *LoginHandler) initActions() {
 		h.RegisterAction(act)
 	}
 	for _, act := range registerPermActions(h) {
+		h.RegisterAction(act)
+	}
+	for _, act := range registerAdmissionActions(h) {
 		h.RegisterAction(act)
 	}
 	for _, act := range registerUpLoginActions(h) {

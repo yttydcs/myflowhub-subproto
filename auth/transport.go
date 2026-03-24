@@ -92,6 +92,27 @@ func (h *LoginHandler) sendDirectResp(ctx context.Context, conn core.IConnection
 	}
 }
 
+func (h *LoginHandler) sendActionData(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any, direct bool) {
+	if conn == nil {
+		return
+	}
+	raw, _ := json.Marshal(data)
+	msg := message{Action: action, Data: raw}
+	payload, _ := json.Marshal(msg)
+	hdr := h.buildHeader(ctx, reqHdr)
+	if direct {
+		hdr = h.buildDirectRespHeader(ctx, reqHdr)
+	}
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		if err := srv.Send(ctx, conn.ID(), hdr, payload); err != nil && h.log != nil {
+			h.log.Warn("send action data failed", "action", action, "err", err)
+		}
+		return
+	}
+	codec := header.HeaderTcpCodec{}
+	_ = conn.SendWithHeader(hdr, payload, codec)
+}
+
 func (h *LoginHandler) buildHeader(ctx context.Context, reqHdr core.IHeader) core.IHeader {
 	if reqHdr != nil {
 		return reqHdr.Clone()

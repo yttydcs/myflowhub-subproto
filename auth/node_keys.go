@@ -10,18 +10,23 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	core "github.com/yttydcs/myflowhub-core"
 	coreconfig "github.com/yttydcs/myflowhub-core/config"
 )
 
 const (
-	nodeKeysFile        = "config/node_keys.json"
-	trustedNodesFile    = "config/trusted_nodes.json"
-	confNodePrivKey     = coreconfig.KeyAuthNodePrivKey
-	confNodePubKey      = coreconfig.KeyAuthNodePubKey
-	confTrustedNodesKey = coreconfig.KeyAuthTrustedNodes
+	nodeKeysFile          = "config/node_keys.json"
+	trustedNodesFile      = "config/trusted_nodes.json"
+	confNodePrivKey       = coreconfig.KeyAuthNodePrivKey
+	confNodePubKey        = coreconfig.KeyAuthNodePubKey
+	confTrustedNodesKey   = coreconfig.KeyAuthTrustedNodes
+	metaPendingRegisters  = "pending_registers"
+	metaApprovedRegisters = "approved_registers"
+	metaRegisterPermits   = "register_permits"
 )
 
 type nodeKeys struct {
@@ -74,21 +79,27 @@ func loadOrCreateNodeKeys(cfg core.IConfig) (*ecdsa.PrivateKey, string, error) {
 	return priv, pubB64, nil
 }
 
-// loadTrustedBindings 读取 trusted_nodes 文件，将 bindings 注入 whitelist，同时补足 trusted 节点。
-// 返回 whitelist、trusted 映射，以及文件中出现的最大 NodeID。
-func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32][]byte, uint32) {
+// loadTrustedBindings 读取 trusted_nodes 文件，将 bindings 与 admission state 一并恢复。
+func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32][]byte, map[string]pendingRegisterRecord, map[string]approvedRegisterRecord, map[string]registerPermitRecord, uint32, error) {
 	path := filepath.Clean(trustedNodesFile)
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
-		return nil, nil, 0
+		if errors.Is(err, os.ErrNotExist) || len(data) == 0 {
+			return nil, nil, nil, nil, nil, 0, nil
+		}
+		return nil, nil, nil, nil, nil, 0, err
 	}
 	var tf trustedFile
 	if err := json.Unmarshal(data, &tf); err != nil {
-		return nil, nil, 0
+		return nil, nil, nil, nil, nil, 0, err
 	}
 	whitelist := make(map[string]bindingRecord)
 	trusted := make(map[uint32][]byte)
+	pending := make(map[string]pendingRegisterRecord)
+	approved := make(map[string]approvedRegisterRecord)
+	permits := make(map[string]registerPermitRecord)
 	var maxNode uint32
+	nowUnix := time.Now().UTC().Unix()
 
 	// bindings: device -> {node_id, pubkey, role, perms}
 	for dev, entry := range tf.Bindings {
@@ -126,16 +137,80 @@ func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32
 		buf, _ := json.Marshal(strMap)
 		cfg.Set(confTrustedNodesKey, string(buf))
 	}
-	return whitelist, trusted, maxNode
+	if len(tf.Meta) > 0 {
+		if raw, ok := tf.Meta[metaPendingRegisters]; ok && len(raw) > 0 {
+			var items []pendingRegisterRecord
+			if err := json.Unmarshal(raw, &items); err != nil {
+				return nil, nil, nil, nil, nil, 0, err
+			}
+			for _, item := range items {
+				item.RequestID = strings.TrimSpace(item.RequestID)
+				item.DeviceID = strings.TrimSpace(item.DeviceID)
+				item.RequestedRole = strings.TrimSpace(item.RequestedRole)
+				item.DisplayName = normalizeDisplayName(item.DisplayName)
+				item.PubKey = strings.TrimSpace(item.PubKey)
+				if item.RequestID == "" || item.DeviceID == "" {
+					continue
+				}
+				if item.ExpiresAt != 0 && item.ExpiresAt <= nowUnix {
+					continue
+				}
+				pending[item.RequestID] = item
+			}
+		}
+		if raw, ok := tf.Meta[metaApprovedRegisters]; ok && len(raw) > 0 {
+			var items []approvedRegisterRecord
+			if err := json.Unmarshal(raw, &items); err != nil {
+				return nil, nil, nil, nil, nil, 0, err
+			}
+			for _, item := range items {
+				item.RequestID = strings.TrimSpace(item.RequestID)
+				item.DeviceID = strings.TrimSpace(item.DeviceID)
+				item.Role = strings.TrimSpace(item.Role)
+				if item.DeviceID == "" || item.NodeID == 0 {
+					continue
+				}
+				if item.ExpiresAt != 0 && item.ExpiresAt <= nowUnix {
+					continue
+				}
+				approved[item.DeviceID] = item
+				if item.NodeID > maxNode {
+					maxNode = item.NodeID
+				}
+			}
+		}
+		if raw, ok := tf.Meta[metaRegisterPermits]; ok && len(raw) > 0 {
+			var items []registerPermitRecord
+			if err := json.Unmarshal(raw, &items); err != nil {
+				return nil, nil, nil, nil, nil, 0, err
+			}
+			for _, item := range items {
+				item.Permit = strings.TrimSpace(item.Permit)
+				item.DeviceID = strings.TrimSpace(item.DeviceID)
+				item.Role = strings.TrimSpace(item.Role)
+				if item.Permit == "" || item.DeviceID == "" || item.Role == "" {
+					continue
+				}
+				if item.ExpiresAt != 0 && item.ExpiresAt <= nowUnix {
+					continue
+				}
+				permits[item.Permit] = item
+			}
+		}
+	}
+	return whitelist, trusted, pending, approved, permits, maxNode, nil
 }
 
-// saveTrustedBindings 将 whitelist 与 trusted map 持久化到同一文件。
-func saveTrustedBindings(bindings map[string]bindingRecord, trusted map[uint32][]byte) {
+// saveTrustedBindings 将 whitelist、trusted 和 admission state 持久化到同一文件。
+func saveTrustedBindings(bindings map[string]bindingRecord, trusted map[uint32][]byte, pending map[string]pendingRegisterRecord, approved map[string]approvedRegisterRecord, permits map[string]registerPermitRecord) error {
 	path := filepath.Clean(trustedNodesFile)
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 
 	tf := trustedFile{
 		Bindings: make(map[string]bindingPersist),
+		Meta:     make(map[string]json.RawMessage),
 	}
 
 	for dev, rec := range bindings {
@@ -156,8 +231,52 @@ func saveTrustedBindings(bindings map[string]bindingRecord, trusted map[uint32][
 		tf.Bindings[dev] = entry
 	}
 
+	if len(pending) > 0 {
+		items := make([]pendingRegisterRecord, 0, len(pending))
+		for _, item := range pending {
+			items = append(items, item)
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].RequestID < items[j].RequestID })
+		raw, err := json.Marshal(items)
+		if err != nil {
+			return err
+		}
+		tf.Meta[metaPendingRegisters] = raw
+	}
+	if len(approved) > 0 {
+		items := make([]approvedRegisterRecord, 0, len(approved))
+		for _, item := range approved {
+			items = append(items, item)
+		}
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].NodeID == items[j].NodeID {
+				return items[i].DeviceID < items[j].DeviceID
+			}
+			return items[i].NodeID < items[j].NodeID
+		})
+		raw, err := json.Marshal(items)
+		if err != nil {
+			return err
+		}
+		tf.Meta[metaApprovedRegisters] = raw
+	}
+	if len(permits) > 0 {
+		items := make([]registerPermitRecord, 0, len(permits))
+		for _, item := range permits {
+			items = append(items, item)
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].Permit < items[j].Permit })
+		raw, err := json.Marshal(items)
+		if err != nil {
+			return err
+		}
+		tf.Meta[metaRegisterPermits] = raw
+	}
+	if len(tf.Meta) == 0 {
+		tf.Meta = nil
+	}
 	data, _ := json.MarshalIndent(tf, "", "  ")
-	_ = os.WriteFile(path, data, 0o600)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func parsePrivKey(b64 string) (*ecdsa.PrivateKey, error) {
