@@ -3,12 +3,14 @@ package exec
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	core "github.com/yttydcs/myflowhub-core"
 	"github.com/yttydcs/myflowhub-core/connmgr"
 	"github.com/yttydcs/myflowhub-core/header"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 func TestCapSnapshotAndQuery(t *testing.T) {
@@ -332,6 +334,129 @@ func TestCapQueryRequiresQueryPermission(t *testing.T) {
 	}
 	if resp.Code != 403 {
 		t.Fatalf("expected code=403, got %+v", resp)
+	}
+}
+
+func TestCapQueryIncludesLocalCapabilitySchemaWhenRequested(t *testing.T) {
+	cm := connmgr.New()
+	srv := &testServer{nodeID: 1, cm: cm}
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	child := &mockConnection{id: "c2"}
+	child.SetMeta("nodeID", uint32(2))
+	if err := cm.Add(child); err != nil {
+		t.Fatalf("add child conn err=%v", err)
+	}
+
+	h := NewHandler(nil)
+	h.Init()
+	if err := h.capRegistry.Register(execcap.Descriptor{
+		Provider: "demo",
+		Method:   "demo::schema",
+		InputSchema: json.RawMessage(`{
+			"title": "Schema Demo",
+			"type": "object",
+			"required": ["name"],
+			"properties": {
+				"name": { "type": "string" },
+				"max_bytes": { "type": "integer" }
+			}
+		}`),
+	}, func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}); err != nil {
+		t.Fatalf("register local capability err=%v", err)
+	}
+
+	queryHdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(SubProtoExec).
+		WithSourceID(2).
+		WithTargetID(1)
+	queryReq := CapQueryReq{
+		ReqID:         "query-schema",
+		RequesterNode: 2,
+		Method:        "demo::schema",
+		IncludeSchema: true,
+	}
+	rawQuery, _ := json.Marshal(queryReq)
+	h.handleCapQuery(ctx, child, queryHdr, rawQuery)
+
+	if len(srv.sends) != 1 {
+		t.Fatalf("expected 1 frame, got %d", len(srv.sends))
+	}
+	action, data := decodeExecEnvelope(t, srv.sends[0].payload)
+	if action != actionCapQueryResp {
+		t.Fatalf("unexpected action=%s", action)
+	}
+	var resp CapQueryResp
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("unmarshal cap_query_resp err=%v", err)
+	}
+	if resp.Code != 1 || resp.Total != 1 || len(resp.Routes) != 1 {
+		t.Fatalf("unexpected cap_query_resp: %+v", resp)
+	}
+	route := resp.Routes[0]
+	if route.ProviderNode != 1 || route.Method != "demo::schema" {
+		t.Fatalf("unexpected route: %+v", route)
+	}
+	assertCapabilityRouteSchema(t, route.InputSchema)
+
+	srv.sends = nil
+	queryReq.IncludeSchema = false
+	rawQuery, _ = json.Marshal(queryReq)
+	h.handleCapQuery(ctx, child, queryHdr, rawQuery)
+
+	if len(srv.sends) != 1 {
+		t.Fatalf("expected 1 frame without schema, got %d", len(srv.sends))
+	}
+	_, data = decodeExecEnvelope(t, srv.sends[0].payload)
+	resp = CapQueryResp{}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("unmarshal cap_query_resp without schema err=%v", err)
+	}
+	if len(resp.Routes) != 1 || len(resp.Routes[0].InputSchema) != 0 {
+		t.Fatalf("expected query route without schema payload: %+v", resp.Routes)
+	}
+}
+
+func assertCapabilityRouteSchema(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatalf("expected input schema")
+	}
+	var schema struct {
+		Title      string   `json:"title"`
+		Type       string   `json:"type"`
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			Type string `json:"type"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("unmarshal route schema err=%v", err)
+	}
+	if schema.Title != "Schema Demo" || schema.Type != "object" {
+		t.Fatalf("unexpected schema header: %+v", schema)
+	}
+	if !reflect.DeepEqual(schema.Required, []string{"name"}) {
+		t.Fatalf("unexpected required fields: %v", schema.Required)
+	}
+	wantTypes := map[string]string{
+		"name":      "string",
+		"max_bytes": "integer",
+	}
+	if len(schema.Properties) != len(wantTypes) {
+		t.Fatalf("unexpected property count: got=%d want=%d", len(schema.Properties), len(wantTypes))
+	}
+	for key, wantType := range wantTypes {
+		got, ok := schema.Properties[key]
+		if !ok {
+			t.Fatalf("missing schema property %s", key)
+		}
+		if got.Type != wantType {
+			t.Fatalf("unexpected type for %s: got=%s want=%s", key, got.Type, wantType)
+		}
 	}
 }
 
