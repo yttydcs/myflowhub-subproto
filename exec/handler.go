@@ -17,6 +17,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/subproto"
 	"github.com/yttydcs/myflowhub-subproto/broker"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
+	"github.com/yttydcs/myflowhub-subproto/exec/runtimedeps"
 )
 
 type MethodFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
@@ -57,26 +58,26 @@ const (
 )
 
 func NewHandler(log *slog.Logger) *Handler {
-	return NewHandlerWithConfig(nil, log)
+	return NewHandlerWithDeps(nil, runtimedeps.Deps{}, log)
 }
 
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
+	return NewHandlerWithDeps(cfg, runtimedeps.Deps{}, log)
+}
+
+func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
+	deps = runtimedeps.Resolve(cfg, deps)
 	h := &Handler{
 		log:           log,
-		capRegistry:   execcap.SharedRegistry(cfg),
+		capRegistry:   deps.CapRegistry,
 		capSelfBypass: loadCapPermissionSelfBypass(cfg),
 		capLocal:      make(map[string]CapabilityDescriptor),
 		capChildren:   make(map[uint32]capPeerState),
 	}
-	if cfg != nil {
-		h.permCfg = permission.SharedConfig(cfg)
-	}
-	if h.permCfg == nil {
-		h.permCfg = permission.NewConfig(nil)
-	}
+	h.permCfg = deps.PermConfig
 	// 内置方法：debug::echo
 	h.RegisterMethod("debug::echo", func(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
 		if len(args) == 0 {

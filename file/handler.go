@@ -22,6 +22,7 @@ import (
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
+	"github.com/yttydcs/myflowhub-subproto/exec/runtimedeps"
 )
 
 const (
@@ -98,26 +99,26 @@ type Handler struct {
 }
 
 func NewHandler(log *slog.Logger) *Handler {
-	return NewHandlerWithConfig(nil, log)
+	return NewHandlerWithDeps(nil, runtimedeps.Deps{}, log)
 }
 
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
+	return NewHandlerWithDeps(cfg, runtimedeps.Deps{}, log)
+}
+
+func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
+	deps = runtimedeps.Resolve(cfg, deps)
 	h := &Handler{
 		log:         log,
 		cfg:         cfg,
 		recv:        make(map[[16]byte]*recvSession),
 		send:        make(map[[16]byte]*sendSession),
-		capRegistry: execcap.SharedRegistry(cfg),
+		capRegistry: deps.CapRegistry,
 	}
-	if cfg != nil {
-		h.permCfg = permission.SharedConfig(cfg)
-	}
-	if h.permCfg == nil {
-		h.permCfg = permission.NewConfig(nil)
-	}
+	h.permCfg = deps.PermConfig
 	h.registerCapabilities()
 	return h
 }

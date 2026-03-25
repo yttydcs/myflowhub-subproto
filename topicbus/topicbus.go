@@ -14,6 +14,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/header"
 	"github.com/yttydcs/myflowhub-core/subproto"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
+	"github.com/yttydcs/myflowhub-subproto/exec/runtimedeps"
 )
 
 // TopicBusHandler 提供 topic 的订阅/退订与逐级转发 publish。
@@ -44,19 +45,24 @@ type TopicBusHandler struct {
 }
 
 func NewTopicBusHandler(log *slog.Logger) *TopicBusHandler {
-	return NewTopicBusHandlerWithConfig(nil, log)
+	return NewTopicBusHandlerWithDeps(nil, runtimedeps.Deps{}, log)
 }
 
 func NewTopicBusHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *TopicBusHandler {
+	return NewTopicBusHandlerWithDeps(cfg, runtimedeps.Deps{}, log)
+}
+
+func NewTopicBusHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *TopicBusHandler {
 	if log == nil {
 		log = slog.Default()
 	}
+	deps = runtimedeps.Resolve(cfg, deps)
 	return &TopicBusHandler{
 		log:            log,
 		topicSubs:      make(map[string]map[string]struct{}),
 		connSubs:       make(map[string]map[string]struct{}),
 		upstreamActive: make(map[string]bool),
-		capRegistry:    execcap.SharedRegistry(cfg),
+		capRegistry:    deps.CapRegistry,
 	}
 }
 
