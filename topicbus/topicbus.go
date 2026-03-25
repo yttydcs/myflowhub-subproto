@@ -65,13 +65,39 @@ const (
 	capabilityTopicPublish     = "topicbus::publish"
 )
 
+var capabilityTopicPublishInputSchema = json.RawMessage(`{
+  "title": "Publish Event",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "topic": {
+      "type": "string",
+      "description": "Topic name."
+    },
+    "name": {
+      "type": "string",
+      "description": "Event name."
+    },
+    "ts": {
+      "type": "integer",
+      "description": "Optional event timestamp."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Arbitrary JSON payload.",
+      "properties": {}
+    }
+  }
+}`)
+
 func (h *TopicBusHandler) registerCapabilities() {
 	if h.capRegistry == nil {
 		return
 	}
 	_ = h.capRegistry.Register(execcap.Descriptor{
-		Provider: capabilityProviderTopicBus,
-		Method:   capabilityTopicPublish,
+		Provider:    capabilityProviderTopicBus,
+		Method:      capabilityTopicPublish,
+		InputSchema: capabilityTopicPublishInputSchema,
 		Tags: map[string]string{
 			"subproto": "topicbus",
 		},

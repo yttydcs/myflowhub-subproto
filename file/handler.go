@@ -34,6 +34,53 @@ const (
 	capabilityFileMkdir    = "file::mkdir"
 )
 
+var capabilityFileListInputSchema = json.RawMessage(`{
+  "title": "List Directory",
+  "type": "object",
+  "properties": {
+    "dir": {
+      "type": "string",
+      "description": "Directory path under the file base dir."
+    }
+  }
+}`)
+
+var capabilityFileReadTextInputSchema = json.RawMessage(`{
+  "title": "Read Text File",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "dir": {
+      "type": "string",
+      "description": "Directory path under the file base dir."
+    },
+    "name": {
+      "type": "string",
+      "description": "File name."
+    },
+    "max_bytes": {
+      "type": "integer",
+      "description": "Optional maximum bytes to read."
+    }
+  }
+}`)
+
+var capabilityFileMkdirInputSchema = json.RawMessage(`{
+  "title": "Create Directory",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "dir": {
+      "type": "string",
+      "description": "Parent directory under the file base dir."
+    },
+    "name": {
+      "type": "string",
+      "description": "Directory name to create."
+    }
+  }
+}`)
+
 type Handler struct {
 	subproto.BaseSubProcess
 	log     *slog.Logger
@@ -82,6 +129,7 @@ func (h *Handler) registerCapabilities() {
 	_ = h.capRegistry.Register(execcap.Descriptor{
 		Provider:    capabilityProviderFile,
 		Method:      capabilityFileList,
+		InputSchema: capabilityFileListInputSchema,
 		Permissions: []string{permRead},
 		Tags: map[string]string{
 			"subproto": "file",
@@ -90,6 +138,7 @@ func (h *Handler) registerCapabilities() {
 	_ = h.capRegistry.Register(execcap.Descriptor{
 		Provider:    capabilityProviderFile,
 		Method:      capabilityFileReadText,
+		InputSchema: capabilityFileReadTextInputSchema,
 		Permissions: []string{permRead},
 		Tags: map[string]string{
 			"subproto": "file",
@@ -98,6 +147,7 @@ func (h *Handler) registerCapabilities() {
 	_ = h.capRegistry.Register(execcap.Descriptor{
 		Provider:    capabilityProviderFile,
 		Method:      capabilityFileMkdir,
+		InputSchema: capabilityFileMkdirInputSchema,
 		Permissions: []string{permWrite},
 		Tags: map[string]string{
 			"subproto": "file",
