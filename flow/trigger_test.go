@@ -1,9 +1,17 @@
 package flow
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	core "github.com/yttydcs/myflowhub-core"
+	coreconfig "github.com/yttydcs/myflowhub-core/config"
+	"github.com/yttydcs/myflowhub-core/connmgr"
+	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
 func TestValidateTrigger(t *testing.T) {
@@ -161,6 +169,60 @@ func TestTryStartScheduledRun_PopulatesIntervalTriggerContext(t *testing.T) {
 	}
 }
 
+func TestTriggerStartedRunPreservesServerContextForLocalCapability(t *testing.T) {
+	cfg := coreconfig.NewMap(map[string]string{})
+	reg := execcap.SharedRegistry(cfg)
+	method := "test::ctx-trigger"
+	seenNode := make(chan uint32, 1)
+	if err := reg.Register(execcap.Descriptor{
+		Provider: "test",
+		Method:   method,
+	}, execcap.InvokeFunc(func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		srv := core.ServerFromContext(ctx)
+		if srv == nil {
+			return nil, errors.New("missing server context")
+		}
+		select {
+		case seenNode <- srv.NodeID():
+		default:
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	})); err != nil {
+		t.Fatalf("register capability err=%v", err)
+	}
+
+	h := NewHandlerWithConfig(cfg, nil)
+	srv := &testServer{nodeID: 7, cm: connmgr.New()}
+	h.BindServer(srv)
+	h.flows["ctx-trigger"] = setReq{
+		FlowID:  "ctx-trigger",
+		Trigger: trigger{Type: "var_changed"},
+		Graph: graph{
+			Nodes: []node{
+				{
+					ID:   "n1",
+					Kind: "call",
+					Spec: json.RawMessage(fmt.Sprintf(`{"method":"%s","args":{"ok":true}}`, method)),
+				},
+			},
+		},
+	}
+
+	h.handleVarChangedEvent(varChangeOpChanged, varChangedEvent{Owner: 1, Name: "foo"})
+
+	state := waitLatestRunStatus(t, h, "ctx-trigger", "succeeded")
+	assertJSONPointerValue(t, state.runtime.Trigger, "/type", triggerTypeVarChanged)
+
+	select {
+	case nodeID := <-seenNode:
+		if nodeID != 7 {
+			t.Fatalf("unexpected server node id=%d", nodeID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("capability was not invoked with server context")
+	}
+}
+
 func makeTestFlow(flowID string, tr trigger) setReq {
 	return setReq{
 		FlowID:  flowID,
@@ -217,6 +279,26 @@ func latestRunStateForTest(t *testing.T, h *Handler, flowID string) *runState {
 		t.Fatalf("expected latest run state for flow %s", flowID)
 	}
 	return state
+}
+
+func waitLatestRunStatus(t *testing.T, h *Handler, flowID string, want string) *runState {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := latestRunStateForTest(t, h, flowID)
+		state.mu.Lock()
+		status := state.status
+		state.mu.Unlock()
+		if status == want {
+			return state
+		}
+		if status == "failed" || status == "cancelled" {
+			t.Fatalf("unexpected run status=%s for flow %s", status, flowID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("run status mismatch for flow %s, want=%s", flowID, want)
+	return nil
 }
 
 func assertJSONPointerValue(t *testing.T, raw json.RawMessage, pointer string, want any) {

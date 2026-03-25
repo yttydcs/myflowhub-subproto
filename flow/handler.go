@@ -215,7 +215,7 @@ func (h *Handler) registerCapabilities() {
 	}
 }
 
-func (h *Handler) invokeCapabilityRun(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+func (h *Handler) invokeCapabilityRun(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		FlowID string `json:"flow_id"`
 	}
@@ -235,7 +235,7 @@ func (h *Handler) invokeCapabilityRun(_ context.Context, args json.RawMessage) (
 		return nil, errors.New("flow not found")
 	}
 
-	runID := h.enqueueRun(context.Background(), flow)
+	runID := h.enqueueRun(ctx, flow)
 	return mustJSON(map[string]string{
 		"flow_id": flow.FlowID,
 		"run_id":  runID,
@@ -1045,6 +1045,21 @@ func (h *Handler) getServer(ctx context.Context) core.IServer {
 	srv := h.srv
 	h.mu.Unlock()
 	return srv
+}
+
+func (h *Handler) backgroundRunContext() context.Context {
+	h.mu.Lock()
+	srv := h.srv
+	h.mu.Unlock()
+	return backgroundRunContextForServer(srv)
+}
+
+func backgroundRunContextForServer(srv core.IServer) context.Context {
+	ctx := context.Background()
+	if srv != nil {
+		return core.WithServerContext(ctx, srv)
+	}
+	return ctx
 }
 
 func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState) {
@@ -2068,7 +2083,7 @@ func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
 
 func (h *Handler) enqueueRunWithTrigger(ctx context.Context, flow setReq, triggerCtx json.RawMessage) string {
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = h.backgroundRunContext()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	runID := newUUID()
@@ -2111,10 +2126,11 @@ func (h *Handler) tryStartRunWithTrigger(flowID string, triggerCtx json.RawMessa
 		return
 	}
 	runID := newUUID()
-	runCtx, cancel := context.WithCancel(context.Background())
+	srv := h.srv
+	runCtx, cancel := context.WithCancel(backgroundRunContextForServer(srv))
 	executorNode := uint32(0)
-	if h.srv != nil {
-		executorNode = h.srv.NodeID()
+	if srv != nil {
+		executorNode = srv.NodeID()
 	}
 	state := &runState{
 		flowID:  flow.FlowID,
