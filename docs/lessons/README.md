@@ -26,3 +26,5 @@
 
 - [capability-provider-observable-side-effects.md](capability-provider-observable-side-effects.md)
   - 线索：`flow set 成功但 varpool 不更新`、`invokeCapabilitySet`、`propagateChange`
+- [flow-trigger-run-missing-server-context.md](flow-trigger-run-missing-server-context.md)
+  - 线索：`trigger flow 不推送但刷新可见`、`tryStartRunWithTrigger`、`core.ServerFromContext(ctx)`

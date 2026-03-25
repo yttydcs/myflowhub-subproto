@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-03-25_flow-trigger-server-context.md](2026-03-25_flow-trigger-server-context.md)
+  - `flow` trigger / capability run 保留 `server context`：恢复本地 capability provider 的实时通知副作用。
   - [2026-03-25_defaultset-deps-release-chain.md](2026-03-25_defaultset-deps-release-chain.md)
   - `defaultset` 依赖链 patch 发布：补齐 `exec` shared packages 与 `WithDeps` 构造路径，供下游 `Server` 在 `GOWORK=off` 模式消费。
   - [2026-03-25_subproto-varstore-capability-schema.md](2026-03-25_subproto-varstore-capability-schema.md)
