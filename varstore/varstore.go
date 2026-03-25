@@ -267,6 +267,7 @@ func (h *VarStoreHandler) invokeCapabilitySet(ctx context.Context, args json.Raw
 	}
 
 	rec, _ := h.lookupOwned(req.Owner, req.Name)
+	wasPublic := rec.IsPublic
 	rec.Owner = req.Owner
 	rec.Value = req.Value
 	if t := strings.TrimSpace(req.Type); t != "" {
@@ -283,7 +284,24 @@ func (h *VarStoreHandler) invokeCapabilitySet(ctx context.Context, args json.Raw
 	}
 
 	h.saveRecord(req.Name, rec)
-	h.publishFlowTriggerEvent(ctx, "varstore.changed", req.Owner, req.Name, &rec)
+	actorID := capabilityActorID(ctx, req.Owner)
+	if wasPublic && !rec.IsPublic {
+		h.handleVisibilityDowngrade(ctx, req.Owner, req.Name, actorID, nil)
+	} else {
+		h.propagateChange(ctx, req.Owner, req.Name, rec, actorID)
+	}
+	if parent := h.findParent(ctx); parent != nil {
+		h.forward(ctx, parent, varActionUpSet, setReq{
+			Name:       req.Name,
+			Value:      req.Value,
+			Visibility: rec.Visibility,
+			Type:       rec.Type,
+			Owner:      req.Owner,
+		}, actorID)
+	}
+	if actorID != req.Owner {
+		h.sendNotifySet(ctx, actorID, req.Owner, req.Name, rec)
+	}
 	resp, _ := json.Marshal(map[string]any{
 		"owner":      rec.Owner,
 		"name":       req.Name,
@@ -338,7 +356,17 @@ func (h *VarStoreHandler) invokeCapabilityRevoke(ctx context.Context, args json.
 		return nil, errors.New("var not found")
 	}
 	h.deleteRecord(req.Owner, req.Name)
-	h.publishFlowTriggerEvent(ctx, "varstore.deleted", req.Owner, req.Name, nil)
+	actorID := capabilityActorID(ctx, req.Owner)
+	h.handleDeletion(ctx, req.Owner, req.Name, actorID, req.Owner)
+	if parent := h.findParent(ctx); parent != nil {
+		h.forward(ctx, parent, varActionUpRevoke, getReq{
+			Name:  req.Name,
+			Owner: req.Owner,
+		}, actorID)
+	}
+	if actorID != req.Owner {
+		h.sendNotifyRevoke(ctx, actorID, req.Owner, req.Name)
+	}
 	resp, _ := json.Marshal(map[string]any{
 		"owner":   req.Owner,
 		"name":    req.Name,
@@ -1541,6 +1569,14 @@ func hdrSourceID(h core.IHeader) uint32 {
 		return 0
 	}
 	return h.SourceID()
+}
+
+func capabilityActorID(ctx context.Context, fallback uint32) uint32 {
+	srv := core.ServerFromContext(ctx)
+	if srv != nil && srv.NodeID() != 0 {
+		return srv.NodeID()
+	}
+	return fallback
 }
 
 func (h *VarStoreHandler) publishFlowTriggerEvent(ctx context.Context, eventName string, owner uint32, name string, rec *varRecord) {

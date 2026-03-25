@@ -7,7 +7,9 @@ import (
 	"sort"
 	"testing"
 
+	core "github.com/yttydcs/myflowhub-core"
 	coreconfig "github.com/yttydcs/myflowhub-core/config"
+	"github.com/yttydcs/myflowhub-core/connmgr"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
 )
 
@@ -133,4 +135,148 @@ func TestVarStoreCapabilitySetGetRevoke(t *testing.T) {
 	if _, err := h.invokeCapabilityGet(context.Background(), json.RawMessage(`{"owner":2,"name":"foo"}`)); err == nil {
 		t.Fatalf("expected var deleted")
 	}
+}
+
+func TestVarStoreCapabilitySetPropagatesSubscriberAndUpstream(t *testing.T) {
+	cfg := coreconfig.NewMap(map[string]string{})
+	h := NewVarStoreHandlerWithConfig(cfg, nil)
+	h.Init()
+	reg := execcap.SharedRegistry(cfg)
+
+	_, setInvoke, ok := reg.Lookup(capabilityVarSetMethod, "")
+	if !ok || setInvoke == nil {
+		t.Fatalf("expected %s capability registered", capabilityVarSetMethod)
+	}
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(9))
+	if err := cm.Add(parent); err != nil {
+		t.Fatalf("add parent conn err=%v", err)
+	}
+
+	child := newTestConn("child")
+	child.SetMeta("nodeID", uint32(2))
+	if err := cm.Add(child); err != nil {
+		t.Fatalf("add child conn err=%v", err)
+	}
+
+	srv := newTestServer(1, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	h.addSubscription(1, "foo", 2, child.ID())
+
+	if _, err := setInvoke(ctx, json.RawMessage(`{"owner":1,"name":"foo","value":"bar","visibility":"public"}`)); err != nil {
+		t.Fatalf("set capability err=%v", err)
+	}
+
+	if len(child.sent) != 1 {
+		t.Fatalf("expected one child notify, got %d", len(child.sent))
+	}
+	childMsg := decodeCapabilityMessage(t, child.sent[0].payload)
+	if childMsg.Action != varActionVarChanged {
+		t.Fatalf("unexpected child action=%s", childMsg.Action)
+	}
+	var childResp varResp
+	if err := json.Unmarshal(childMsg.Data, &childResp); err != nil {
+		t.Fatalf("decode child response err=%v", err)
+	}
+	if childResp.Owner != 1 || childResp.Name != "foo" || childResp.Value != "bar" {
+		t.Fatalf("unexpected child response=%+v", childResp)
+	}
+
+	if len(parent.sent) != 1 {
+		t.Fatalf("expected one upstream sync, got %d", len(parent.sent))
+	}
+	parentMsg := decodeCapabilityMessage(t, parent.sent[0].payload)
+	if parentMsg.Action != varActionUpSet {
+		t.Fatalf("unexpected parent action=%s", parentMsg.Action)
+	}
+	if parent.sent[0].hdr == nil {
+		t.Fatalf("expected parent header")
+	}
+	if parent.sent[0].hdr.SourceID() != 1 {
+		t.Fatalf("unexpected parent source=%d", parent.sent[0].hdr.SourceID())
+	}
+}
+
+func TestVarStoreCapabilityRevokePropagatesSubscriberAndUpstream(t *testing.T) {
+	cfg := coreconfig.NewMap(map[string]string{})
+	h := NewVarStoreHandlerWithConfig(cfg, nil)
+	h.Init()
+	reg := execcap.SharedRegistry(cfg)
+
+	_, revokeInvoke, ok := reg.Lookup(capabilityVarRevokeMethod, "")
+	if !ok || revokeInvoke == nil {
+		t.Fatalf("expected %s capability registered", capabilityVarRevokeMethod)
+	}
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(9))
+	if err := cm.Add(parent); err != nil {
+		t.Fatalf("add parent conn err=%v", err)
+	}
+
+	child := newTestConn("child")
+	child.SetMeta("nodeID", uint32(2))
+	if err := cm.Add(child); err != nil {
+		t.Fatalf("add child conn err=%v", err)
+	}
+
+	srv := newTestServer(1, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	h.saveRecord("foo", varRecord{
+		Owner:      1,
+		Value:      "bar",
+		Type:       "string",
+		Visibility: visibilityPublic,
+		IsPublic:   true,
+	})
+	h.addSubscription(1, "foo", 2, child.ID())
+
+	if _, err := revokeInvoke(ctx, json.RawMessage(`{"owner":1,"name":"foo"}`)); err != nil {
+		t.Fatalf("revoke capability err=%v", err)
+	}
+
+	if len(child.sent) != 1 {
+		t.Fatalf("expected one child delete notify, got %d", len(child.sent))
+	}
+	childMsg := decodeCapabilityMessage(t, child.sent[0].payload)
+	if childMsg.Action != varActionVarDeleted {
+		t.Fatalf("unexpected child action=%s", childMsg.Action)
+	}
+	var childResp varResp
+	if err := json.Unmarshal(childMsg.Data, &childResp); err != nil {
+		t.Fatalf("decode child delete response err=%v", err)
+	}
+	if childResp.Owner != 1 || childResp.Name != "foo" {
+		t.Fatalf("unexpected child delete response=%+v", childResp)
+	}
+
+	if len(parent.sent) != 1 {
+		t.Fatalf("expected one upstream revoke, got %d", len(parent.sent))
+	}
+	parentMsg := decodeCapabilityMessage(t, parent.sent[0].payload)
+	if parentMsg.Action != varActionUpRevoke {
+		t.Fatalf("unexpected parent action=%s", parentMsg.Action)
+	}
+	if parent.sent[0].hdr == nil {
+		t.Fatalf("expected parent header")
+	}
+	if parent.sent[0].hdr.SourceID() != 1 {
+		t.Fatalf("unexpected parent source=%d", parent.sent[0].hdr.SourceID())
+	}
+}
+
+func decodeCapabilityMessage(t *testing.T, payload []byte) varMessage {
+	t.Helper()
+	var msg varMessage
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		t.Fatalf("decode message err=%v", err)
+	}
+	return msg
 }
