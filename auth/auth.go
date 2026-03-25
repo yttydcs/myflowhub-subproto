@@ -42,7 +42,11 @@ type LoginHandler struct {
 	requireApproval bool
 	pendingTTL      time.Duration
 	permitTTL       time.Duration
+	initErr         error
 	now             func() time.Time
+
+	firstRegisterBootstrap      firstRegisterBootstrapConfig
+	firstRegisterBootstrapState firstRegisterBootstrapState
 }
 
 type pendingInfo struct {
@@ -81,7 +85,7 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 			h.nodePubB64 = pub
 		}
 		if !h.disablePersist {
-			wl, trusted, pending, approved, permits, maxNode, err := loadTrustedBindings(cfg)
+			wl, trusted, pending, approved, permits, bootstrapState, maxNode, err := loadTrustedBindings(cfg)
 			if err != nil {
 				h.log.Warn("load auth persisted state failed", "err", err)
 			} else {
@@ -106,6 +110,7 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 				if len(permits) > 0 {
 					h.registerPermits = permits
 				}
+				h.firstRegisterBootstrapState = bootstrapState
 				if maxNode >= 2 {
 					h.nextID.Store(maxNode + 1)
 				}
@@ -114,6 +119,7 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 	}
 	h.loadAuthConfig(cfg)
 	h.loadAdmissionConfig(cfg)
+	h.loadFirstRegisterBootstrapConfig(cfg)
 	if h.nextID.Load() < 2 {
 		h.nextID.Store(2)
 	}
@@ -154,6 +160,12 @@ func (h *LoginHandler) addTrustedNode(nodeID uint32, pubB64 string) {
 func (h *LoginHandler) SubProto() uint8 { return 2 }
 
 func (h *LoginHandler) Init() bool {
+	if h.initErr != nil {
+		if h.log != nil {
+			h.log.Error("init auth handler failed", "err", h.initErr)
+		}
+		return false
+	}
 	h.initActions()
 	return true
 }

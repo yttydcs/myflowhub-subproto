@@ -233,12 +233,13 @@ func TestPersistAndReloadAdmissionState(t *testing.T) {
 
 	now := time.Now().UTC()
 	h := &LoginHandler{
-		whitelist:         map[string]bindingRecord{"dev-a": {NodeID: 7, Role: "node", Perms: []string{"exec.call"}}},
-		pendingRegisters:  map[string]pendingRegisterRecord{"req-1": {RequestID: "req-1", DeviceID: "dev-pending", RequestedRole: "admin", CreatedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}},
-		pendingByDevice:   map[string]string{"dev-pending": "req-1"},
-		approvedRegisters: map[string]approvedRegisterRecord{"dev-approved": {RequestID: "req-2", DeviceID: "dev-approved", NodeID: 8, Role: "admin", ApprovedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}},
-		registerPermits:   map[string]registerPermitRecord{"permit-1": {Permit: "permit-1", DeviceID: "dev-permit", Role: "admin", IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}},
-		now:               func() time.Time { return now },
+		whitelist:                   map[string]bindingRecord{"dev-a": {NodeID: 7, Role: "node", Perms: []string{"exec.call"}}},
+		pendingRegisters:            map[string]pendingRegisterRecord{"req-1": {RequestID: "req-1", DeviceID: "dev-pending", RequestedRole: "admin", CreatedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}},
+		pendingByDevice:             map[string]string{"dev-pending": "req-1"},
+		approvedRegisters:           map[string]approvedRegisterRecord{"dev-approved": {RequestID: "req-2", DeviceID: "dev-approved", NodeID: 8, Role: "admin", ApprovedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}},
+		registerPermits:             map[string]registerPermitRecord{"permit-1": {Permit: "permit-1", DeviceID: "dev-permit", Role: "admin", IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix()}},
+		firstRegisterBootstrapState: firstRegisterBootstrapState{ConsumedEpoch: 3, ConsumedAt: now.Unix(), DeviceID: "dev-bootstrap", NodeID: 9, Role: "admin"},
+		now:                         func() time.Time { return now },
 	}
 	h.persistState()
 
@@ -246,7 +247,7 @@ func TestPersistAndReloadAdmissionState(t *testing.T) {
 		t.Fatalf("trusted state file not written: %v", err)
 	}
 
-	wl, _, pending, approved, permits, maxNode, err := loadTrustedBindings(nil)
+	wl, _, pending, approved, permits, bootstrapState, maxNode, err := loadTrustedBindings(nil)
 	if err != nil {
 		t.Fatalf("loadTrustedBindings: %v", err)
 	}
@@ -262,8 +263,11 @@ func TestPersistAndReloadAdmissionState(t *testing.T) {
 	if len(permits) != 1 {
 		t.Fatalf("unexpected permits size: got %d want 1", len(permits))
 	}
-	if maxNode != 8 {
-		t.Fatalf("unexpected max node: got %d want 8", maxNode)
+	if bootstrapState.ConsumedEpoch != 3 || bootstrapState.NodeID != 9 {
+		t.Fatalf("unexpected bootstrap state: %+v", bootstrapState)
+	}
+	if maxNode != 9 {
+		t.Fatalf("unexpected max node: got %d want 9", maxNode)
 	}
 }
 
