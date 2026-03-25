@@ -20,6 +20,7 @@ import (
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"
 	"github.com/yttydcs/myflowhub-core/subproto"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
+	"github.com/yttydcs/myflowhub-subproto/exec/runtimedeps"
 )
 
 type VarStoreHandler struct {
@@ -41,13 +42,27 @@ type VarStoreHandler struct {
 
 	permCfg     *permission.Config
 	capRegistry *execcap.Registry
+	persistence Persistence
+}
+
+type HandlerOptions struct {
+	RuntimeDeps runtimedeps.Deps
+	Persistence Persistence
 }
 
 func NewVarStoreHandler(log *slog.Logger) *VarStoreHandler {
-	return NewVarStoreHandlerWithConfig(nil, log)
+	return NewVarStoreHandlerWithOptions(nil, HandlerOptions{}, log)
 }
 
 func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreHandler {
+	return NewVarStoreHandlerWithOptions(cfg, HandlerOptions{}, log)
+}
+
+func NewVarStoreHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *VarStoreHandler {
+	return NewVarStoreHandlerWithOptions(cfg, HandlerOptions{RuntimeDeps: deps}, log)
+}
+
+func NewVarStoreHandlerWithOptions(cfg core.IConfig, opts HandlerOptions, log *slog.Logger) *VarStoreHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -55,6 +70,11 @@ func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreH
 		cfg = coreconfig.NewMap(map[string]string{
 			coreconfig.KeyAuthDefaultPerms: "",
 		})
+	}
+	deps := runtimedeps.Resolve(cfg, opts.RuntimeDeps)
+	store := opts.Persistence
+	if store == nil {
+		store = NewMemoryPersistence()
 	}
 	h := &VarStoreHandler{
 		log:           log,
@@ -66,14 +86,10 @@ func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreH
 		connSubs:      make(map[string]map[string]struct{}),
 		upstreamSubs:  make(map[string]bool),
 		pendingSubs:   make(map[pendingKey][]pendingSubscriber),
-		capRegistry:   execcap.SharedRegistry(cfg),
+		capRegistry:   deps.CapRegistry,
+		persistence:   store,
 	}
-	if cfg != nil {
-		h.permCfg = permission.SharedConfig(cfg)
-	}
-	if h.permCfg == nil {
-		h.permCfg = permission.NewConfig(nil)
-	}
+	h.permCfg = deps.PermConfig
 	h.registerCapabilities()
 	return h
 }
@@ -282,6 +298,9 @@ func (h *VarStoreHandler) invokeCapabilitySet(ctx context.Context, args json.Raw
 		rec.IsPublic = false
 	}
 
+	if err := h.persistRecord(ctx, req.Name, rec); err != nil {
+		return nil, err
+	}
 	h.saveRecord(req.Name, rec)
 	h.publishFlowTriggerEvent(ctx, "varstore.changed", req.Owner, req.Name, &rec)
 	resp, _ := json.Marshal(map[string]any{
@@ -337,6 +356,9 @@ func (h *VarStoreHandler) invokeCapabilityRevoke(ctx context.Context, args json.
 	if _, ok := h.lookupOwned(req.Owner, req.Name); !ok {
 		return nil, errors.New("var not found")
 	}
+	if err := h.persistDelete(ctx, req.Owner, req.Name); err != nil {
+		return nil, err
+	}
 	h.deleteRecord(req.Owner, req.Name)
 	h.publishFlowTriggerEvent(ctx, "varstore.deleted", req.Owner, req.Name, nil)
 	resp, _ := json.Marshal(map[string]any{
@@ -373,6 +395,10 @@ func (h *VarStoreHandler) AcceptCmd() bool { return true }
 func (h *VarStoreHandler) SubProto() uint8 { return 3 }
 
 func (h *VarStoreHandler) Init() bool {
+	if err := h.loadPersistedRecords(context.Background()); err != nil {
+		h.log.Warn("varstore load persisted state failed", "err", err)
+		return false
+	}
 	h.initActions()
 	return true
 }
@@ -487,6 +513,11 @@ func (h *VarStoreHandler) handleSet(ctx context.Context, conn core.IConnection, 
 		rec.IsPublic = false
 	}
 
+	if err := h.persistRecord(ctx, req.Name, rec); err != nil {
+		h.log.Warn("varstore persist set failed", "owner", owner, "name", req.Name, "err", err)
+		h.sendResp(ctx, conn, hdr, chooseSetResp(assisted), varResp{Code: 5, Msg: "persist failed", Name: req.Name, Owner: owner})
+		return
+	}
 	h.saveRecord(req.Name, rec)
 
 	// 可见性降级为私有：视为删除，清理订阅并下发删除通知
@@ -650,6 +681,11 @@ func (h *VarStoreHandler) handleRevoke(ctx context.Context, conn core.IConnectio
 		return
 	}
 
+	if err := h.persistDelete(ctx, owner, req.Name); err != nil {
+		h.log.Warn("varstore persist revoke failed", "owner", owner, "name", req.Name, "err", err)
+		h.sendResp(ctx, conn, hdr, chooseRevokeResp(assisted), varResp{Code: 5, Msg: "persist failed", Name: req.Name, Owner: owner})
+		return
+	}
 	h.deleteRecord(owner, req.Name)
 	h.handleDeletion(ctx, owner, req.Name, actorID, hdrSourceID(hdr), owner)
 
@@ -1060,6 +1096,69 @@ func (h *VarStoreHandler) lookupOwned(owner uint32, name string) (varRecord, boo
 	return rec, ok
 }
 
+func (h *VarStoreHandler) loadPersistedRecords(ctx context.Context) error {
+	if h == nil || h.persistence == nil {
+		return nil
+	}
+	docs, err := h.persistence.LoadAll(ctx)
+	if err != nil {
+		return err
+	}
+	records := make(map[string]varRecord, len(docs))
+	cache := make(map[string]map[uint32]bool)
+	for _, doc := range docs {
+		name := strings.TrimSpace(doc.Name)
+		if doc.Owner == 0 || !validVarName(name) {
+			continue
+		}
+		rec := varRecord{
+			Owner:      doc.Owner,
+			Value:      doc.Value,
+			Type:       doc.Type,
+			Visibility: strings.TrimSpace(doc.Visibility),
+			IsPublic:   strings.EqualFold(strings.TrimSpace(doc.Visibility), visibilityPublic),
+		}
+		if rec.Visibility == "" {
+			rec.Visibility = visibilityPrivate
+			rec.IsPublic = false
+		}
+		records[varKey(doc.Owner, name)] = rec
+		if _, ok := cache[name]; !ok {
+			cache[name] = make(map[uint32]bool)
+		}
+		cache[name][doc.Owner] = true
+	}
+	h.mu.Lock()
+	h.records = records
+	h.cache = cache
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *VarStoreHandler) persistRecord(ctx context.Context, name string, rec varRecord) error {
+	if h == nil || h.persistence == nil {
+		return nil
+	}
+	doc := VarDocument{
+		Name:       strings.TrimSpace(name),
+		Owner:      rec.Owner,
+		Value:      rec.Value,
+		Visibility: strings.TrimSpace(rec.Visibility),
+		Type:       rec.Type,
+	}
+	if doc.Visibility == "" {
+		doc.Visibility = visibilityPrivate
+	}
+	return h.persistence.Save(ctx, doc)
+}
+
+func (h *VarStoreHandler) persistDelete(ctx context.Context, owner uint32, name string) error {
+	if h == nil || h.persistence == nil {
+		return nil
+	}
+	return h.persistence.Delete(ctx, owner, strings.TrimSpace(name))
+}
+
 func (h *VarStoreHandler) saveRecord(name string, rec varRecord) {
 	if name == "" || rec.Owner == 0 {
 		return
@@ -1097,7 +1196,7 @@ func (h *VarStoreHandler) listNames(owner uint32, includePrivate bool) []string 
 }
 
 func (h *VarStoreHandler) key(owner uint32, name string) string {
-	return strconv.FormatUint(uint64(owner), 10) + ":" + name
+	return varKey(owner, name)
 }
 
 func (h *VarStoreHandler) addOwnerCache(name string, owner uint32) {

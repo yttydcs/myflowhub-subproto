@@ -13,6 +13,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/subproto"
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
+	"github.com/yttydcs/myflowhub-subproto/exec/runtimedeps"
 )
 
 type ManagementHandler struct {
@@ -25,10 +26,17 @@ type ManagementHandler struct {
 }
 
 func NewHandler(log *slog.Logger) *ManagementHandler {
+	return NewHandlerWithDeps(runtimedeps.Deps{}, log)
+}
+
+func NewHandlerWithDeps(deps runtimedeps.Deps, log *slog.Logger) *ManagementHandler {
 	if log == nil {
 		log = slog.Default()
 	}
-	h := &ManagementHandler{log: log}
+	h := &ManagementHandler{
+		log:         log,
+		capRegistry: deps.CapRegistry,
+	}
 	return h
 }
 
@@ -93,7 +101,9 @@ func (h *ManagementHandler) ensureCapabilities(srv core.IServer) {
 		h.capMu.Unlock()
 		return
 	}
-	h.capRegistry = execcap.SharedRegistry(srv.Config())
+	if h.capRegistry == nil {
+		h.capRegistry = execcap.SharedRegistry(srv.Config())
+	}
 	h.capReady = true
 	h.capMu.Unlock()
 

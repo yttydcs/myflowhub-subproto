@@ -24,9 +24,15 @@ import (
 	protocolexec "github.com/yttydcs/myflowhub-proto/protocol/exec"
 	"github.com/yttydcs/myflowhub-subproto/broker"
 	execcap "github.com/yttydcs/myflowhub-subproto/exec/capability"
+	"github.com/yttydcs/myflowhub-subproto/exec/runtimedeps"
 )
 
 type LocalMethodFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
+
+type HandlerOptions struct {
+	RuntimeDeps runtimedeps.Deps
+	Persistence Persistence
+}
 
 type Handler struct {
 	subproto.ActionBaseSubProcess
@@ -40,6 +46,8 @@ type Handler struct {
 
 	baseDir         string
 	maxRetainedRuns int
+	persistence     Persistence
+	explicitStore   bool
 	flows           map[string]setReq
 	runs            map[string]*runState // run_id -> state
 	runOrderByFlow  map[string][]string  // flow_id -> ordered run_ids (oldest -> newest)
@@ -102,32 +110,38 @@ type varChangedEvent struct {
 }
 
 func NewHandler(log *slog.Logger) *Handler {
-	return NewHandlerWithConfig(nil, log)
+	return NewHandlerWithOptions(nil, HandlerOptions{}, log)
 }
 
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
+	return NewHandlerWithOptions(cfg, HandlerOptions{}, log)
+}
+
+func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *Handler {
+	return NewHandlerWithOptions(cfg, HandlerOptions{RuntimeDeps: deps}, log)
+}
+
+func NewHandlerWithOptions(cfg core.IConfig, opts HandlerOptions, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
+	deps := runtimedeps.Resolve(cfg, opts.RuntimeDeps)
 	loadedCfg := loadConfig(cfg)
 	h := &Handler{
 		log:             log,
 		cfg:             cfg,
 		baseDir:         loadedCfg.BaseDir,
 		maxRetainedRuns: loadedCfg.MaxRetainedRuns,
+		persistence:     opts.Persistence,
+		explicitStore:   opts.Persistence != nil,
 		flows:           make(map[string]setReq),
 		runs:            make(map[string]*runState),
 		runOrderByFlow:  make(map[string][]string),
 		schedulers:      make(map[string]*flowScheduler),
 		localMethods:    make(map[string]LocalMethodFunc),
-		capRegistry:     execcap.SharedRegistry(cfg),
+		capRegistry:     deps.CapRegistry,
 	}
-	if cfg != nil {
-		h.permCfg = permission.SharedConfig(cfg)
-	}
-	if h.permCfg == nil {
-		h.permCfg = permission.NewConfig(nil)
-	}
+	h.permCfg = deps.PermConfig
 	// 内置 local 方法：debug::echo / debug::fail
 	h.RegisterLocalMethod("debug::echo", func(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
 		if len(args) == 0 {
@@ -160,8 +174,10 @@ func (h *Handler) Init() bool {
 	cfg := loadConfig(h.cfg)
 	h.baseDir = cfg.BaseDir
 	h.maxRetainedRuns = cfg.MaxRetainedRuns
-	_ = os.MkdirAll(h.baseDir, 0o755)
-	h.loadFlowsFromDisk()
+	if err := h.loadFlowsFromDisk(); err != nil {
+		h.log.Warn("flow load persisted state failed", "err", err)
+		return false
+	}
 	h.initActions()
 	return true
 }
@@ -488,20 +504,9 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 		return
 	}
 	h.mu.Lock()
-	base := h.baseDir
+	store := h.currentPersistenceLocked()
 	h.mu.Unlock()
-
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "mkdir failed", FlowID: req.FlowID})
-		return
-	}
-	path, err := flowFilePath(base, req.FlowID)
-	if err != nil {
-		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: ""})
-		return
-	}
-	raw, _ := json.MarshalIndent(req, "", "  ")
-	if err := writeFileAtomic(path, raw, 0o644); err != nil {
+	if err := store.Save(ctx, FlowDocument(req)); err != nil {
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 500, Msg: "write failed", FlowID: req.FlowID})
 		return
 	}
@@ -649,21 +654,12 @@ func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req
 		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: flowID})
 		return
 	}
-	base := h.baseDir
+	store := h.currentPersistenceLocked()
 	h.mu.Unlock()
-
-	base = strings.TrimSpace(base)
-	if base != "" {
-		path, err := flowFilePath(base, flowID)
-		if err != nil {
-			h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
-			return
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			h.log.Warn("flow delete remove file failed", "flow_id", flowID, "path", path, "err", err)
-			h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "delete file failed", FlowID: flowID})
-			return
-		}
+	if err := store.Delete(ctx, flowID); err != nil {
+		h.log.Warn("flow delete persistence failed", "flow_id", flowID, "err", err)
+		h.sendDeleteRespToNode(ctx, reqHdr, origin, deleteResp{ReqID: req.ReqID, Code: 500, Msg: "delete file failed", FlowID: flowID})
+		return
 	}
 	h.mu.Lock()
 	delete(h.flows, flowID)
@@ -1575,6 +1571,13 @@ func (h *Handler) sendToConn(ctx context.Context, conn core.IConnection, hdr cor
 	return srv.Send(ctx, conn.ID(), hdr, payload)
 }
 
+func (h *Handler) currentPersistenceLocked() Persistence {
+	if h.explicitStore && h.persistence != nil {
+		return h.persistence
+	}
+	return NewJSONPersistence(h.baseDir)
+}
+
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
@@ -1820,31 +1823,17 @@ func topoOrder(g graph) ([]*node, error) {
 	return out, nil
 }
 
-func (h *Handler) loadFlowsFromDisk() {
-	base := strings.TrimSpace(h.baseDir)
-	if base == "" {
-		return
-	}
-	entries, err := os.ReadDir(base)
+func (h *Handler) loadFlowsFromDisk() error {
+	h.mu.Lock()
+	store := h.currentPersistenceLocked()
+	h.mu.Unlock()
+	docs, err := store.LoadAll(context.Background())
 	if err != nil {
-		return
+		return err
 	}
-	for _, e := range entries {
-		if e == nil || e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(base, name))
-		if err != nil {
-			continue
-		}
-		var req setReq
-		if err := json.Unmarshal(raw, &req); err != nil {
-			continue
-		}
+	loaded := make(map[string]setReq, len(docs))
+	for _, doc := range docs {
+		req := setReq(doc)
 		validFlowID, err := validateFlowID(req.FlowID)
 		if err != nil {
 			continue
@@ -1854,10 +1843,12 @@ func (h *Handler) loadFlowsFromDisk() {
 		if validateTrigger(req.Trigger) != nil {
 			continue
 		}
-		h.mu.Lock()
-		h.flows[req.FlowID] = req
-		h.mu.Unlock()
+		loaded[req.FlowID] = req
 	}
+	h.mu.Lock()
+	h.flows = loaded
+	h.mu.Unlock()
+	return nil
 }
 
 func (h *Handler) ensureTriggerSubscriptions(srv core.IServer) {
