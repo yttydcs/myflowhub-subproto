@@ -24,6 +24,7 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-03-25_subproto-varstore-capability-schema.md](2026-03-25_subproto-varstore-capability-schema.md)
   - [2026-03-25_subproto-capability-input-schema.md](2026-03-25_subproto-capability-input-schema.md)
   - [2026-03-22_management-node-display-name-followup.md](2026-03-22_management-node-display-name-followup.md)
   - [2026-03-22_management-display-name-and-persistence-hook.md](2026-03-22_management-display-name-and-persistence-hook.md)

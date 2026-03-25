@@ -88,27 +88,158 @@ const (
 	capabilityVarRevokeMethod  = "varstore::revoke"
 )
 
+var capabilityVarGetInputSchema = json.RawMessage(`{
+  "title": "VarStore Get",
+  "type": "object",
+  "required": ["owner", "name"],
+  "properties": {
+    "owner": {
+      "type": "integer",
+      "title": "Owner",
+      "description": "Owner node ID of the variable."
+    },
+    "name": {
+      "type": "string",
+      "title": "Name",
+      "description": "Variable name."
+    }
+  }
+}`)
+
+var capabilityVarSetInputSchema = json.RawMessage(`{
+  "title": "VarStore Set",
+  "type": "object",
+  "required": ["owner", "name", "value"],
+  "properties": {
+    "owner": {
+      "type": "integer",
+      "title": "Owner",
+      "description": "Owner node ID of the variable."
+    },
+    "name": {
+      "type": "string",
+      "title": "Name",
+      "description": "Variable name."
+    },
+    "value": {
+      "type": "string",
+      "title": "Value",
+      "description": "Variable value payload.",
+      "x-ui-control": "textarea"
+    },
+    "type": {
+      "type": "string",
+      "title": "Type",
+      "description": "Optional variable type label."
+    },
+    "visibility": {
+      "type": "string",
+      "title": "Visibility",
+      "description": "Variable visibility.",
+      "enum": ["private", "public"],
+      "default": "private"
+    }
+  }
+}`)
+
+var capabilityVarRevokeInputSchema = json.RawMessage(`{
+  "title": "VarStore Revoke",
+  "type": "object",
+  "required": ["owner", "name"],
+  "properties": {
+    "owner": {
+      "type": "integer",
+      "title": "Owner",
+      "description": "Owner node ID of the variable."
+    },
+    "name": {
+      "type": "string",
+      "title": "Name",
+      "description": "Variable name."
+    }
+  }
+}`)
+
+var capabilityVarRecordOutputSchema = json.RawMessage(`{
+  "title": "VarStore Record",
+  "type": "object",
+  "required": ["owner", "name", "value", "type", "visibility", "is_public"],
+  "properties": {
+    "owner": {
+      "type": "integer",
+      "title": "Owner"
+    },
+    "name": {
+      "type": "string",
+      "title": "Name"
+    },
+    "value": {
+      "type": "string",
+      "title": "Value"
+    },
+    "type": {
+      "type": "string",
+      "title": "Type"
+    },
+    "visibility": {
+      "type": "string",
+      "title": "Visibility",
+      "enum": ["private", "public"]
+    },
+    "is_public": {
+      "type": "boolean",
+      "title": "Is Public"
+    }
+  }
+}`)
+
+var capabilityVarRevokeOutputSchema = json.RawMessage(`{
+  "title": "VarStore Revoke Result",
+  "type": "object",
+  "required": ["owner", "name", "deleted"],
+  "properties": {
+    "owner": {
+      "type": "integer",
+      "title": "Owner"
+    },
+    "name": {
+      "type": "string",
+      "title": "Name"
+    },
+    "deleted": {
+      "type": "boolean",
+      "title": "Deleted"
+    }
+  }
+}`)
+
 func (h *VarStoreHandler) registerCapabilities() {
 	if h.capRegistry == nil {
 		return
 	}
 	_ = h.capRegistry.Register(execcap.Descriptor{
-		Provider: capabilityProviderVarStore,
-		Method:   capabilityVarSetMethod,
+		Provider:     capabilityProviderVarStore,
+		Method:       capabilityVarSetMethod,
+		InputSchema:  capabilityVarSetInputSchema,
+		OutputSchema: capabilityVarRecordOutputSchema,
 		Tags: map[string]string{
 			"subproto": "varstore",
 		},
 	}, execcap.InvokeFunc(h.invokeCapabilitySet))
 	_ = h.capRegistry.Register(execcap.Descriptor{
-		Provider: capabilityProviderVarStore,
-		Method:   capabilityVarGetMethod,
+		Provider:     capabilityProviderVarStore,
+		Method:       capabilityVarGetMethod,
+		InputSchema:  capabilityVarGetInputSchema,
+		OutputSchema: capabilityVarRecordOutputSchema,
 		Tags: map[string]string{
 			"subproto": "varstore",
 		},
 	}, execcap.InvokeFunc(h.invokeCapabilityGet))
 	_ = h.capRegistry.Register(execcap.Descriptor{
-		Provider: capabilityProviderVarStore,
-		Method:   capabilityVarRevokeMethod,
+		Provider:     capabilityProviderVarStore,
+		Method:       capabilityVarRevokeMethod,
+		InputSchema:  capabilityVarRevokeInputSchema,
+		OutputSchema: capabilityVarRevokeOutputSchema,
 		Tags: map[string]string{
 			"subproto": "varstore",
 		},
