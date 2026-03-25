@@ -228,8 +228,9 @@ func (h *LoginHandler) persistState() {
 	for permit, rec := range h.registerPermits {
 		permits[permit] = rec
 	}
+	bootstrapState := h.firstRegisterBootstrapState
 	h.mu.Unlock()
-	if err := saveTrustedBindings(bindings, trusted, pending, approved, permits); err != nil && h.log != nil {
+	if err := saveTrustedBindings(bindings, trusted, pending, approved, permits, bootstrapState); err != nil && h.log != nil {
 		h.log.Warn("persist auth state failed", "err", err)
 	}
 }

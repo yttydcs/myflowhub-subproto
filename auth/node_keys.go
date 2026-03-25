@@ -19,14 +19,15 @@ import (
 )
 
 const (
-	nodeKeysFile          = "config/node_keys.json"
-	trustedNodesFile      = "config/trusted_nodes.json"
-	confNodePrivKey       = coreconfig.KeyAuthNodePrivKey
-	confNodePubKey        = coreconfig.KeyAuthNodePubKey
-	confTrustedNodesKey   = coreconfig.KeyAuthTrustedNodes
-	metaPendingRegisters  = "pending_registers"
-	metaApprovedRegisters = "approved_registers"
-	metaRegisterPermits   = "register_permits"
+	nodeKeysFile                    = "config/node_keys.json"
+	trustedNodesFile                = "config/trusted_nodes.json"
+	confNodePrivKey                 = coreconfig.KeyAuthNodePrivKey
+	confNodePubKey                  = coreconfig.KeyAuthNodePubKey
+	confTrustedNodesKey             = coreconfig.KeyAuthTrustedNodes
+	metaPendingRegisters            = "pending_registers"
+	metaApprovedRegisters           = "approved_registers"
+	metaRegisterPermits             = "register_permits"
+	metaFirstRegisterBootstrapState = "first_register_bootstrap"
 )
 
 type nodeKeys struct {
@@ -80,24 +81,25 @@ func loadOrCreateNodeKeys(cfg core.IConfig) (*ecdsa.PrivateKey, string, error) {
 }
 
 // loadTrustedBindings 读取 trusted_nodes 文件，将 bindings 与 admission state 一并恢复。
-func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32][]byte, map[string]pendingRegisterRecord, map[string]approvedRegisterRecord, map[string]registerPermitRecord, uint32, error) {
+func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32][]byte, map[string]pendingRegisterRecord, map[string]approvedRegisterRecord, map[string]registerPermitRecord, firstRegisterBootstrapState, uint32, error) {
 	path := filepath.Clean(trustedNodesFile)
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		if errors.Is(err, os.ErrNotExist) || len(data) == 0 {
-			return nil, nil, nil, nil, nil, 0, nil
+			return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, nil
 		}
-		return nil, nil, nil, nil, nil, 0, err
+		return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, err
 	}
 	var tf trustedFile
 	if err := json.Unmarshal(data, &tf); err != nil {
-		return nil, nil, nil, nil, nil, 0, err
+		return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, err
 	}
 	whitelist := make(map[string]bindingRecord)
 	trusted := make(map[uint32][]byte)
 	pending := make(map[string]pendingRegisterRecord)
 	approved := make(map[string]approvedRegisterRecord)
 	permits := make(map[string]registerPermitRecord)
+	bootstrapState := firstRegisterBootstrapState{}
 	var maxNode uint32
 	nowUnix := time.Now().UTC().Unix()
 
@@ -141,7 +143,7 @@ func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32
 		if raw, ok := tf.Meta[metaPendingRegisters]; ok && len(raw) > 0 {
 			var items []pendingRegisterRecord
 			if err := json.Unmarshal(raw, &items); err != nil {
-				return nil, nil, nil, nil, nil, 0, err
+				return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, err
 			}
 			for _, item := range items {
 				item.RequestID = strings.TrimSpace(item.RequestID)
@@ -161,7 +163,7 @@ func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32
 		if raw, ok := tf.Meta[metaApprovedRegisters]; ok && len(raw) > 0 {
 			var items []approvedRegisterRecord
 			if err := json.Unmarshal(raw, &items); err != nil {
-				return nil, nil, nil, nil, nil, 0, err
+				return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, err
 			}
 			for _, item := range items {
 				item.RequestID = strings.TrimSpace(item.RequestID)
@@ -182,7 +184,7 @@ func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32
 		if raw, ok := tf.Meta[metaRegisterPermits]; ok && len(raw) > 0 {
 			var items []registerPermitRecord
 			if err := json.Unmarshal(raw, &items); err != nil {
-				return nil, nil, nil, nil, nil, 0, err
+				return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, err
 			}
 			for _, item := range items {
 				item.Permit = strings.TrimSpace(item.Permit)
@@ -197,12 +199,22 @@ func loadTrustedBindings(cfg core.IConfig) (map[string]bindingRecord, map[uint32
 				permits[item.Permit] = item
 			}
 		}
+		if raw, ok := tf.Meta[metaFirstRegisterBootstrapState]; ok && len(raw) > 0 {
+			if err := json.Unmarshal(raw, &bootstrapState); err != nil {
+				return nil, nil, nil, nil, nil, firstRegisterBootstrapState{}, 0, err
+			}
+			bootstrapState.DeviceID = strings.TrimSpace(bootstrapState.DeviceID)
+			bootstrapState.Role = strings.TrimSpace(bootstrapState.Role)
+			if bootstrapState.NodeID > maxNode {
+				maxNode = bootstrapState.NodeID
+			}
+		}
 	}
-	return whitelist, trusted, pending, approved, permits, maxNode, nil
+	return whitelist, trusted, pending, approved, permits, bootstrapState, maxNode, nil
 }
 
 // saveTrustedBindings 将 whitelist、trusted 和 admission state 持久化到同一文件。
-func saveTrustedBindings(bindings map[string]bindingRecord, trusted map[uint32][]byte, pending map[string]pendingRegisterRecord, approved map[string]approvedRegisterRecord, permits map[string]registerPermitRecord) error {
+func saveTrustedBindings(bindings map[string]bindingRecord, trusted map[uint32][]byte, pending map[string]pendingRegisterRecord, approved map[string]approvedRegisterRecord, permits map[string]registerPermitRecord, bootstrapState firstRegisterBootstrapState) error {
 	path := filepath.Clean(trustedNodesFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -271,6 +283,13 @@ func saveTrustedBindings(bindings map[string]bindingRecord, trusted map[uint32][
 			return err
 		}
 		tf.Meta[metaRegisterPermits] = raw
+	}
+	if bootstrapState.ConsumedEpoch > 0 {
+		raw, err := json.Marshal(bootstrapState)
+		if err != nil {
+			return err
+		}
+		tf.Meta[metaFirstRegisterBootstrapState] = raw
 	}
 	if len(tf.Meta) == 0 {
 		tf.Meta = nil

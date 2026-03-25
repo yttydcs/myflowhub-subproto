@@ -91,6 +91,14 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 		h.finishRegisterSuccess(ctx, conn, hdr, send, respAction, req, approved.NodeID, approved.Role, pubRaw, approved.RequestID)
 		return
 	}
+	if bootstrap, rejected, handled := h.tryConsumeFirstRegisterBootstrap(ctx, req, pubRaw); handled {
+		if rejected != nil {
+			send(ctx, conn, hdr, respAction, *rejected)
+			return
+		}
+		h.finishRegisterSuccess(ctx, conn, hdr, send, respAction, req, bootstrap.NodeID, bootstrap.Role, pubRaw, "")
+		return
+	}
 	if h.requireApproval {
 		pending, err := h.savePendingRegister(req)
 		if err != nil {
