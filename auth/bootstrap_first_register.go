@@ -12,7 +12,7 @@ import (
 	coreconfig "github.com/yttydcs/myflowhub-core/config"
 )
 
-const defaultFirstRegisterBootstrapRole = "admin"
+const defaultFirstRegisterBootstrapRole = coreconfig.DefaultAuthBootstrapFirstRegisterRole
 
 type firstRegisterBootstrapConfig struct {
 	Enabled   bool
