@@ -53,7 +53,7 @@ func (h *LoginHandler) handleLoginResp(ctx context.Context, data json.RawMessage
 func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
 	send := h.sendDirectResp
 	if assisted {
-		send = h.sendResp
+		send = h.sendAssistResp
 	}
 	var req loginData
 	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
@@ -61,6 +61,9 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		return
 	}
 	req.DisplayName = normalizeDisplayName(req.DisplayName)
+	if assisted && h.tryForwardAssistUpstream(ctx, conn, hdr, actionAssistLogin, req, actionAssistLoginResp, req.DeviceID) {
+		return
+	}
 	authority := h.resolveAuthority(ctx)
 	if assisted {
 		rec, ok := h.lookup(req.DeviceID)
@@ -68,11 +71,15 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 			if authority.remote() {
 				// 向上查询公钥
 				h.setPending(req.DeviceID, conn.ID(), hdr)
-				h.forward(ctx, authority.conn, actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID})
+				if h.forwardAuthorityRequest(ctx, authority, hdr, actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID}) {
+					return
+				}
+				h.popPending(req.DeviceID)
+				h.sendAssistResp(ctx, conn, hdr, actionAssistLoginResp, authorityUnavailableResp(req.DeviceID))
 				return
 			}
 			if authority.unavailable() {
-				h.sendResp(ctx, conn, hdr, actionAssistLoginResp, authorityUnavailableResp(req.DeviceID))
+				h.sendAssistResp(ctx, conn, hdr, actionAssistLoginResp, authorityUnavailableResp(req.DeviceID))
 				return
 			}
 		}
@@ -93,7 +100,7 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 			applyDisplayNameMeta(conn, req.DisplayName)
 		}
 		h.addRouteIndex(ctx, rec.NodeID, conn)
-		h.sendResp(ctx, conn, hdr, actionAssistLoginResp, respData{
+		h.sendAssistResp(ctx, conn, hdr, actionAssistLoginResp, respData{
 			Code:        1,
 			Msg:         "ok",
 			DeviceID:    req.DeviceID,
@@ -111,7 +118,11 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		if len(rec.PubKey) == 0 {
 			if authority.remote() {
 				h.setPending(req.DeviceID, conn.ID(), hdr)
-				h.forward(ctx, authority.conn, actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID})
+				if h.forwardAuthorityRequest(ctx, authority, hdr, actionAssistQueryCred, queryCredData{DeviceID: req.DeviceID, NodeID: req.NodeID}) {
+					return
+				}
+				h.popPending(req.DeviceID)
+				send(ctx, conn, hdr, actionLoginResp, authorityUnavailableResp(req.DeviceID))
 				return
 			}
 			if authority.unavailable() {
@@ -148,7 +159,11 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 	// not found locally, try authority
 	if authority.remote() {
 		h.setPending(req.DeviceID, conn.ID(), hdr)
-		h.forward(ctx, authority.conn, actionAssistLogin, req)
+		if h.forwardAuthorityRequest(ctx, authority, hdr, actionAssistLogin, req) {
+			return
+		}
+		h.popPending(req.DeviceID)
+		send(ctx, conn, hdr, actionLoginResp, authorityUnavailableResp(req.DeviceID))
 		return
 	}
 	if authority.unavailable() {

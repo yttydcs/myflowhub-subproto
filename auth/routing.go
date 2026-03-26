@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	core "github.com/yttydcs/myflowhub-core"
 	coreconfig "github.com/yttydcs/myflowhub-core/config"
@@ -19,8 +20,9 @@ const (
 )
 
 type authoritySelection struct {
-	mode authorityMode
-	conn core.IConnection
+	mode         authorityMode
+	conn         core.IConnection
+	targetNodeID uint32
 }
 
 func localNodeID(ctx context.Context) uint32 {
@@ -35,15 +37,46 @@ func (h *LoginHandler) resolveAuthority(ctx context.Context) authoritySelection 
 	if srv == nil {
 		return authoritySelection{mode: authorityModeUnavailable}
 	}
+	if h.isSemiCentralMode() {
+		return h.resolveSemiCentralAuthority(ctx, srv)
+	}
 	explicitAuthority := h.explicitAuthorityNodeID(srv.Config())
 	if explicitAuthority != 0 {
 		if c, ok := srv.ConnManager().GetByNode(explicitAuthority); ok {
-			return authoritySelection{mode: authorityModeRemote, conn: c}
+			return authoritySelection{mode: authorityModeRemote, conn: c, targetNodeID: explicitAuthority}
 		}
 		return authoritySelection{mode: authorityModeUnavailable}
 	}
 	if parent := h.selectAuthorityConn(ctx); parent != nil {
-		return authoritySelection{mode: authorityModeRemote, conn: parent}
+		return authoritySelection{mode: authorityModeRemote, conn: parent, targetNodeID: connectionNodeID(parent)}
+	}
+	if h.parentConfigured(srv.Config()) {
+		return authoritySelection{mode: authorityModeUnavailable}
+	}
+	return authoritySelection{mode: authorityModeLocal}
+}
+
+func (h *LoginHandler) resolveSemiCentralAuthority(ctx context.Context, srv core.IServer) authoritySelection {
+	if h == nil || srv == nil {
+		return authoritySelection{mode: authorityModeUnavailable}
+	}
+	if parent := h.selectAuthorityConn(ctx); parent != nil {
+		if policy, ok := h.currentRuntimeAuthorityPolicy(time.Now().UTC()); ok && policy.effectiveAuthorityID != 0 && policy.effectiveAuthorityID != srv.NodeID() {
+			return authoritySelection{
+				mode:         authorityModeRemote,
+				conn:         parent,
+				targetNodeID: policy.effectiveAuthorityID,
+			}
+		}
+		target := connectionNodeID(parent)
+		if target == 0 {
+			return authoritySelection{mode: authorityModeUnavailable}
+		}
+		return authoritySelection{
+			mode:         authorityModeRemote,
+			conn:         parent,
+			targetNodeID: target,
+		}
 	}
 	if h.parentConfigured(srv.Config()) {
 		return authoritySelection{mode: authorityModeUnavailable}
@@ -128,15 +161,25 @@ func findParentConnLogin(cm core.IConnectionManager) (core.IConnection, bool) {
 	}
 	var parent core.IConnection
 	cm.Range(func(c core.IConnection) bool {
-		if role, ok := c.GetMeta(core.MetaRoleKey); ok {
-			if s, ok2 := role.(string); ok2 && s == core.RoleParent {
-				parent = c
-				return false
-			}
+		if isParentConnLogin(c) {
+			parent = c
+			return false
 		}
 		return true
 	})
 	return parent, parent != nil
+}
+
+func isParentConnLogin(c core.IConnection) bool {
+	if c == nil {
+		return false
+	}
+	if role, ok := c.GetMeta(core.MetaRoleKey); ok {
+		if s, ok2 := role.(string); ok2 && s == core.RoleParent {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *LoginHandler) broadcast(ctx context.Context, src core.IConnection, action string, data any) {

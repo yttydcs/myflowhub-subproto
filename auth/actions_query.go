@@ -12,13 +12,16 @@ import (
 func (h *LoginHandler) handleAssistQuery(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req queryCredData
 	if err := json.Unmarshal(data, &req); err != nil || req.DeviceID == "" {
-		h.sendResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 400, Msg: "invalid query"})
+		h.sendAssistResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 400, Msg: "invalid query"})
+		return
+	}
+	if h.tryForwardAssistUpstream(ctx, conn, hdr, actionAssistQueryCred, req, actionAssistQueryCredResp, req.DeviceID) {
 		return
 	}
 	if rec, ok := h.lookup(req.DeviceID); ok {
 		nodePub := ""
 		nodePub = encodePubKey(rec.PubKey)
-		h.sendResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{
+		h.sendAssistResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{
 			Code:     1,
 			Msg:      "ok",
 			DeviceID: req.DeviceID,
@@ -30,7 +33,7 @@ func (h *LoginHandler) handleAssistQuery(ctx context.Context, conn core.IConnect
 		})
 		return
 	}
-	h.sendResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 4001, Msg: "not found"})
+	h.sendAssistResp(ctx, conn, hdr, actionAssistQueryCredResp, respData{Code: 4001, Msg: "not found", DeviceID: req.DeviceID})
 }
 
 func (h *LoginHandler) handleAssistQueryResp(ctx context.Context, data json.RawMessage) {

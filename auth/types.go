@@ -24,6 +24,7 @@ const (
 	actionListRolesResp            = protocol.ActionListRolesResp
 	actionPermsInvalidate          = protocol.ActionPermsInvalidate
 	actionPermsSnapshot            = protocol.ActionPermsSnapshot
+	actionAuthorityPolicySync      = protocol.ActionAuthorityPolicySync
 	actionListPendingRegisters     = protocol.ActionListPendingRegisters
 	actionListPendingRegistersResp = protocol.ActionListPendingRegistersResp
 	actionApproveRegister          = protocol.ActionApproveRegister
@@ -47,6 +48,7 @@ type queryCredData = protocol.QueryCredData
 type offlineData = protocol.OfflineData
 type permsQueryData = protocol.PermsQueryData
 type invalidateData = protocol.InvalidateData
+type authorityPolicySyncData = protocol.AuthorityPolicySyncData
 type rolePermEntry = protocol.RolePermEntry
 type listRolesReq = protocol.ListRolesReq
 type pendingRegisterInfo = protocol.PendingRegisterInfo

@@ -66,6 +66,14 @@ func (h *LoginHandler) sendResp(ctx context.Context, conn core.IConnection, reqH
 	}
 }
 
+func (h *LoginHandler) sendAssistResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
+	if reqHdr != nil && reqHdr.SourceID() != 0 {
+		h.sendTargetedResp(ctx, conn, reqHdr, action, data)
+		return
+	}
+	h.sendResp(ctx, conn, reqHdr, action, data)
+}
+
 func (h *LoginHandler) sendDirectResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
 	msg := message{Action: action}
 	raw, _ := json.Marshal(data)
@@ -90,6 +98,31 @@ func (h *LoginHandler) sendDirectResp(ctx context.Context, conn core.IConnection
 		codec := header.HeaderTcpCodec{}
 		_ = conn.SendWithHeader(hdr, payload, codec)
 	}
+}
+
+func (h *LoginHandler) sendTargetedResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
+	if conn == nil || reqHdr == nil {
+		return
+	}
+	msg := message{Action: action}
+	raw, _ := json.Marshal(data)
+	msg.Data = raw
+	payload, _ := json.Marshal(msg)
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		if data.HubID == 0 {
+			data.HubID = srv.NodeID()
+			raw, _ = json.Marshal(data)
+			msg.Data = raw
+			payload, _ = json.Marshal(msg)
+		}
+		hdr := header.BuildTCPResponse(reqHdr, uint32(len(payload)), 2)
+		if err := srv.Send(ctx, conn.ID(), hdr, payload); err != nil && h.log != nil {
+			h.log.Warn("send targeted resp failed", "action", action, "err", err)
+		}
+		return
+	}
+	codec := header.HeaderTcpCodec{}
+	_ = conn.SendWithHeader(header.BuildTCPResponse(reqHdr, uint32(len(payload)), 2), payload, codec)
 }
 
 func (h *LoginHandler) sendActionData(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any, direct bool) {
@@ -154,6 +187,71 @@ func (h *LoginHandler) forward(ctx context.Context, targetConn core.IConnection,
 	}
 	codec := header.HeaderTcpCodec{}
 	_ = targetConn.SendWithHeader(hdr, payload, codec)
+}
+
+func (h *LoginHandler) forwardAuthorityRequest(ctx context.Context, authority authoritySelection, reqHdr core.IHeader, action string, data any) bool {
+	target := authority.targetNodeID
+	if target == 0 {
+		target = connectionNodeID(authority.conn)
+	}
+	source := localNodeID(ctx)
+	if source == 0 || target == 0 {
+		return false
+	}
+	return h.sendAuthCmdToTarget(ctx, authority.conn, reqHdr, action, data, source, target, false)
+}
+
+func (h *LoginHandler) forwardInheritedAuthorityRequest(ctx context.Context, authority authoritySelection, reqHdr core.IHeader, action string, data any) bool {
+	target := authority.targetNodeID
+	if target == 0 {
+		target = connectionNodeID(authority.conn)
+	}
+	source := uint32(0)
+	if reqHdr != nil {
+		source = reqHdr.SourceID()
+	}
+	if source == 0 {
+		source = localNodeID(ctx)
+	}
+	if source == 0 || target == 0 {
+		return false
+	}
+	return h.sendAuthCmdToTarget(ctx, authority.conn, reqHdr, action, data, source, target, true)
+}
+
+func (h *LoginHandler) sendAuthCmdToTarget(ctx context.Context, targetConn core.IConnection, reqHdr core.IHeader, action string, data any, sourceNodeID uint32, targetNodeID uint32, forwarded bool) bool {
+	if targetConn == nil || sourceNodeID == 0 || targetNodeID == 0 {
+		return false
+	}
+	payloadData, _ := json.Marshal(data)
+	msg := message{Action: action, Data: payloadData}
+	payload, _ := json.Marshal(msg)
+
+	var hdr *header.HeaderTcp
+	if forwarded {
+		var ok bool
+		hdr, ok = header.CloneToTCPForForward(reqHdr)
+		if !ok {
+			return false
+		}
+	} else if reqHdr != nil {
+		hdr = header.CloneToTCP(reqHdr)
+	} else {
+		hdr = &header.HeaderTcp{}
+	}
+	hdr.WithMajor(header.MajorCmd).WithSubProto(2).WithSourceID(sourceNodeID).WithTargetID(targetNodeID)
+
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		if err := srv.Send(ctx, targetConn.ID(), hdr, payload); err != nil {
+			if h.log != nil {
+				h.log.Warn("forward authority request failed", "action", action, "target", targetNodeID, "err", err)
+			}
+			return false
+		}
+		return true
+	}
+	codec := header.HeaderTcpCodec{}
+	return targetConn.SendWithHeader(hdr, payload, codec) == nil
 }
 
 // route index helpers: allow mapping child nodeIDs to the connection carrying them.

@@ -30,7 +30,7 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 	send := h.sendDirectResp
 	respAction := actionRegisterResp
 	if assisted {
-		send = h.sendResp
+		send = h.sendAssistResp
 		respAction = actionAssistRegisterResp
 	}
 	var req registerData
@@ -52,11 +52,18 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 			pubRaw = raw
 		}
 	}
+	if assisted && h.tryForwardAssistUpstream(ctx, conn, hdr, actionAssistRegister, req, respAction, req.DeviceID) {
+		return
+	}
 	if !assisted {
 		authority := h.resolveAuthority(ctx)
 		if authority.remote() {
 			h.setPending(req.DeviceID, conn.ID(), hdr)
-			h.forward(ctx, authority.conn, actionAssistRegister, req)
+			if h.forwardAuthorityRequest(ctx, authority, hdr, actionAssistRegister, req) {
+				return
+			}
+			h.popPending(req.DeviceID)
+			send(ctx, conn, hdr, respAction, authorityUnavailableResp(req.DeviceID))
 			return
 		}
 		if authority.unavailable() {

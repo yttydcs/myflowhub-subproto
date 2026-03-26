@@ -33,6 +33,12 @@ type LoginHandler struct {
 
 	authNode uint32
 
+	authorityMode           string
+	authorityPolicyTTL      time.Duration
+	authorityPolicy         runtimeAuthorityPolicy
+	authorityPolicyLoopOnce sync.Once
+	authorityPolicyEpoch    atomic.Uint64
+
 	permCfg     *permission.Config
 	nodePriv    *ecdsa.PrivateKey
 	nodePubB64  string
@@ -118,6 +124,7 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 		}
 	}
 	h.loadAuthConfig(cfg)
+	h.loadAuthorityPolicyConfig(cfg)
 	h.loadAdmissionConfig(cfg)
 	h.loadFirstRegisterBootstrapConfig(cfg)
 	if h.nextID.Load() < 2 {
@@ -170,12 +177,37 @@ func (h *LoginHandler) Init() bool {
 	return true
 }
 
+func (h *LoginHandler) BindServer(srv core.IServer) {
+	if h == nil || srv == nil || !h.isSemiCentralMode() || h.parentConfigured(srv.Config()) {
+		return
+	}
+	h.authorityPolicyLoopOnce.Do(func() {
+		ctx := core.WithServerContext(context.Background(), srv)
+		h.broadcastLocalAuthorityPolicy(ctx)
+		go func() {
+			ticker := time.NewTicker(h.authorityPolicyRefreshInterval())
+			defer ticker.Stop()
+			for range ticker.C {
+				h.broadcastLocalAuthorityPolicy(ctx)
+			}
+		}()
+	})
+}
+
 // AllowSourceMismatch 登录阶段允许 SourceID 与连接元数据不一致（尚未绑定 nodeID）。
 func (h *LoginHandler) AllowSourceMismatch() bool { return true }
 func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	var msg message
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		h.log.Warn("invalid login payload", "err", err)
+		return
+	}
+	if h.shouldForwardByHeaderTarget(ctx, hdr, msg.Action) {
+		forwarded, code, msgText := h.forwardCmdByHeaderTarget(ctx, conn, hdr, payload)
+		if forwarded {
+			return
+		}
+		h.sendForwardError(ctx, conn, hdr, msg, code, msgText)
 		return
 	}
 	entry, ok := h.LookupAction(msg.Action)
@@ -208,6 +240,9 @@ func (h *LoginHandler) initActions() {
 		h.RegisterAction(act)
 	}
 	for _, act := range registerPermActions(h) {
+		h.RegisterAction(act)
+	}
+	for _, act := range registerAuthorityPolicyActions(h) {
 		h.RegisterAction(act)
 	}
 	for _, act := range registerAdmissionActions(h) {

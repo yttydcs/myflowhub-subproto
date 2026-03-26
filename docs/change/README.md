@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-03-26_auth-semi-central-authority.md](2026-03-26_auth-semi-central-authority.md)
+  - auth 半中心 authority runtime：root 下发 authority lease，多跳 assist 仅转发到 edge hub，断链后冻结新准入但保留本地已知身份登录。
   - [2026-03-25_flow-trigger-server-context.md](2026-03-25_flow-trigger-server-context.md)
   - `flow` trigger / capability run 保留 `server context`：恢复本地 capability provider 的实时通知副作用。
   - [2026-03-25_defaultset-deps-release-chain.md](2026-03-25_defaultset-deps-release-chain.md)
