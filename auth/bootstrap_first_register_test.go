@@ -37,8 +37,8 @@ func TestHandleRegister_FirstRegisterBootstrapBypassesPending(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected bootstrap whitelist entry")
 	}
-	if rec.Role != "admin" {
-		t.Fatalf("unexpected bootstrap role: got %q want %q", rec.Role, "admin")
+	if rec.Role != "superadmin" {
+		t.Fatalf("unexpected bootstrap role: got %q want %q", rec.Role, "superadmin")
 	}
 	if h.firstRegisterBootstrapState.ConsumedEpoch != 1 {
 		t.Fatalf("unexpected consumed epoch: got %d want 1", h.firstRegisterBootstrapState.ConsumedEpoch)
@@ -161,7 +161,7 @@ func TestHandleRegister_FirstRegisterBootstrapEpochReopen(t *testing.T) {
 		ConsumedAt:    h.now().Add(-time.Hour).Unix(),
 		DeviceID:      "dev-bootstrap",
 		NodeID:        9,
-		Role:          "admin",
+		Role:          "superadmin",
 	}
 
 	cm := connmgr.New()
@@ -235,10 +235,8 @@ func newFirstRegisterBootstrapHandler(t *testing.T, overrides map[string]string,
 
 	cfgData := map[string]string{
 		coreconfig.KeyAuthDefaultRole:                    "node",
-		coreconfig.KeyAuthRolePerms:                      "admin:auth.pending.list,auth.register.approve,auth.register.reject,auth.permit.issue,auth.permit.revoke;node:",
 		coreconfig.KeyAuthRegisterRequireApproval:        "true",
 		coreconfig.KeyAuthBootstrapFirstRegisterEnable:   "true",
-		coreconfig.KeyAuthBootstrapFirstRegisterRole:     "admin",
 		coreconfig.KeyAuthBootstrapFirstRegisterDeviceID: "dev-bootstrap",
 		coreconfig.KeyAuthBootstrapFirstRegisterEpoch:    "1",
 	}
