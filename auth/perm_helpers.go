@@ -34,6 +34,13 @@ func (h *LoginHandler) resolvePerms(nodeID uint32) []string {
 	return h.permCfg.ResolvePerms(nodeID)
 }
 
+func (h *LoginHandler) resolvePermsForRole(role string) []string {
+	if h.permCfg == nil {
+		return nil
+	}
+	return h.permCfg.ResolvePermsForRole(role)
+}
+
 func (h *LoginHandler) resolveRolePerms(nodeID uint32) (string, []string) {
 	return h.resolveRole(nodeID), h.resolvePerms(nodeID)
 }
@@ -69,8 +76,10 @@ func (h *LoginHandler) applyRolePerms(deviceID string, nodeID uint32, role strin
 
 func (h *LoginHandler) lookupByNode(nodeID uint32) (role string, perms []string, ok bool) {
 	h.mu.RLock()
-	for _, rec := range h.whitelist {
+	var deviceID string
+	for dev, rec := range h.whitelist {
 		if rec.NodeID == nodeID {
+			deviceID = dev
 			role = rec.Role
 			perms = cloneSlice(rec.Perms)
 			ok = true
@@ -79,6 +88,17 @@ func (h *LoginHandler) lookupByNode(nodeID uint32) (role string, perms []string,
 	}
 	h.mu.RUnlock()
 	if ok && role != "" {
+		if len(perms) == 0 {
+			perms = h.resolvePermsForRole(role)
+			if len(perms) > 0 && deviceID != "" {
+				h.mu.Lock()
+				if rec, exists := h.whitelist[deviceID]; exists && rec.NodeID == nodeID && rec.Role == role && len(rec.Perms) == 0 {
+					rec.Perms = cloneSlice(perms)
+					h.whitelist[deviceID] = rec
+				}
+				h.mu.Unlock()
+			}
+		}
 		return role, perms, true
 	}
 	role = h.resolveRole(nodeID)

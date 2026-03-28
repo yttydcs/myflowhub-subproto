@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-03-28_subproto-auth-permit-list-runtime.md](2026-03-28_subproto-auth-permit-list-runtime.md)
+  - auth register permit list runtime：新增活动 permit list action，复用现有 permit 生命周期，并对缺失 perms 的角色记录做惰性回填。
   - [2026-03-26_auth-semi-central-authority.md](2026-03-26_auth-semi-central-authority.md)
   - auth 半中心 authority runtime：root 下发 authority lease，多跳 assist 仅转发到 edge hub，断链后冻结新准入但保留本地已知身份登录。
   - [2026-03-25_flow-trigger-server-context.md](2026-03-25_flow-trigger-server-context.md)

@@ -404,6 +404,59 @@ func (h *LoginHandler) listPendingRegisters(req listPendingRegistersReq) listPen
 	}
 }
 
+func (h *LoginHandler) listRegisterPermits(req listRegisterPermitsReq) listRegisterPermitsResp {
+	now := h.admissionNow()
+	filterDeviceID := strings.TrimSpace(req.DeviceID)
+	h.mu.Lock()
+	h.cleanupExpiredAdmissionLocked(now)
+	items := make([]registerPermitInfo, 0, len(h.registerPermits))
+	for _, rec := range h.registerPermits {
+		if filterDeviceID != "" && rec.DeviceID != filterDeviceID {
+			continue
+		}
+		items = append(items, registerPermitInfo{
+			Permit:    rec.Permit,
+			DeviceID:  rec.DeviceID,
+			Role:      rec.Role,
+			IssuedBy:  rec.IssuedBy,
+			IssuedAt:  rec.IssuedAt,
+			ExpiresAt: rec.ExpiresAt,
+		})
+	}
+	h.mu.Unlock()
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].IssuedAt == items[j].IssuedAt {
+			return items[i].Permit < items[j].Permit
+		}
+		return items[i].IssuedAt > items[j].IssuedAt
+	})
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	total := len(items)
+	if offset >= total {
+		return listRegisterPermitsResp{Code: 1, Msg: "ok", Total: total, Items: []registerPermitInfo{}}
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return listRegisterPermitsResp{
+		Code:  1,
+		Msg:   "ok",
+		Total: total,
+		Items: items[offset:end],
+	}
+}
+
 func (h *LoginHandler) resolveAdmissionRole(values ...string) (string, error) {
 	for _, value := range values {
 		role := strings.TrimSpace(value)

@@ -218,6 +218,137 @@ func TestHandleIssueRegisterPermit_PermissionDenied(t *testing.T) {
 	}
 }
 
+func TestHandleListRegisterPermits_PermissionDenied(t *testing.T) {
+	cm := connmgr.New()
+	conn := &mockConnection{id: "child-list-action"}
+	conn.SetMeta("nodeID", uint32(5))
+	_ = cm.Add(conn)
+	srv := newRecordingAuthServer(1, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	h := newAdmissionTestHandler(false, "")
+	h.whitelist["actor"] = bindingRecord{NodeID: 5, Role: "node"}
+	reqRaw, err := json.Marshal(listRegisterPermitsReq{Limit: 10})
+	if err != nil {
+		t.Fatalf("marshal list permit req: %v", err)
+	}
+
+	hdr := (&header.HeaderTcp{}).WithSourceID(5)
+	h.handleListRegisterPermits(ctx, conn, hdr, reqRaw)
+
+	if len(srv.sent) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(srv.sent))
+	}
+	frame, resp := decodeAuthFrame[listRegisterPermitsResp](t, srv.sent[0].payload)
+	if frame.Action != actionListRegisterPermitsResp {
+		t.Fatalf("unexpected action: got %q want %q", frame.Action, actionListRegisterPermitsResp)
+	}
+	if resp.Code != 4403 {
+		t.Fatalf("unexpected code: got %d want 4403", resp.Code)
+	}
+}
+
+func TestHandleListRegisterPermits_AllowsPermitRevokeRoleAndCleansExpired(t *testing.T) {
+	cm := connmgr.New()
+	conn := &mockConnection{id: "child-list"}
+	conn.SetMeta("nodeID", uint32(5))
+	_ = cm.Add(conn)
+	srv := newRecordingAuthServer(1, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	h := newAdmissionTestHandler(false, "admin:auth.permit.revoke")
+	h.whitelist["actor"] = bindingRecord{NodeID: 5, Role: "admin"}
+	now := h.now()
+	h.registerPermits["permit-old"] = registerPermitRecord{
+		Permit:    "permit-old",
+		DeviceID:  "dev-a",
+		Role:      "admin",
+		IssuedBy:  9,
+		IssuedAt:  now.Add(-10 * time.Minute).Unix(),
+		ExpiresAt: now.Add(30 * time.Minute).Unix(),
+	}
+	h.registerPermits["permit-new"] = registerPermitRecord{
+		Permit:    "permit-new",
+		DeviceID:  "dev-b",
+		Role:      "admin",
+		IssuedBy:  9,
+		IssuedAt:  now.Add(-5 * time.Minute).Unix(),
+		ExpiresAt: now.Add(40 * time.Minute).Unix(),
+	}
+	h.registerPermits["permit-expired"] = registerPermitRecord{
+		Permit:    "permit-expired",
+		DeviceID:  "dev-c",
+		Role:      "admin",
+		IssuedBy:  9,
+		IssuedAt:  now.Add(-20 * time.Minute).Unix(),
+		ExpiresAt: now.Add(-time.Minute).Unix(),
+	}
+	reqRaw, err := json.Marshal(listRegisterPermitsReq{Offset: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("marshal list permit req: %v", err)
+	}
+
+	hdr := (&header.HeaderTcp{}).WithSourceID(5)
+	h.handleListRegisterPermits(ctx, conn, hdr, reqRaw)
+
+	if len(srv.sent) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(srv.sent))
+	}
+	frame, resp := decodeAuthFrame[listRegisterPermitsResp](t, srv.sent[0].payload)
+	if frame.Action != actionListRegisterPermitsResp {
+		t.Fatalf("unexpected action: got %q want %q", frame.Action, actionListRegisterPermitsResp)
+	}
+	if resp.Code != 1 {
+		t.Fatalf("unexpected code: got %d want 1", resp.Code)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("unexpected total: got %d want 2", resp.Total)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("unexpected item count: got %d want 2", len(resp.Items))
+	}
+	if resp.Items[0].Permit != "permit-new" || resp.Items[1].Permit != "permit-old" {
+		t.Fatalf("unexpected order: %+v", resp.Items)
+	}
+	if _, ok := h.registerPermits["permit-expired"]; ok {
+		t.Fatalf("expired permit should be cleaned before list")
+	}
+
+	filtered := h.listRegisterPermits(listRegisterPermitsReq{DeviceID: "dev-a"})
+	if filtered.Total != 1 || len(filtered.Items) != 1 || filtered.Items[0].Permit != "permit-old" {
+		t.Fatalf("unexpected filtered result: %+v", filtered)
+	}
+}
+
+func TestListRegisterPermits_ReflectsRevokeAndConsume(t *testing.T) {
+	h := newAdmissionTestHandler(false, "admin:auth.permit.issue")
+
+	permitA, err := h.issueRegisterPermit("dev-a", "admin", 0, 9)
+	if err != nil {
+		t.Fatalf("issueRegisterPermit A: %v", err)
+	}
+	permitB, err := h.issueRegisterPermit("dev-b", "admin", 0, 9)
+	if err != nil {
+		t.Fatalf("issueRegisterPermit B: %v", err)
+	}
+	listed := h.listRegisterPermits(listRegisterPermitsReq{Offset: 0, Limit: 10})
+	if listed.Total != 2 {
+		t.Fatalf("unexpected total before revoke/consume: got %d want 2", listed.Total)
+	}
+
+	if _, ok := h.revokeRegisterPermit(permitA.Permit); !ok {
+		t.Fatalf("expected revoke to succeed")
+	}
+	if _, err := h.consumeRegisterPermit(permitB.Permit, "dev-b"); err != nil {
+		t.Fatalf("consumeRegisterPermit: %v", err)
+	}
+
+	listed = h.listRegisterPermits(listRegisterPermitsReq{Offset: 0, Limit: 10})
+	if listed.Total != 0 || len(listed.Items) != 0 {
+		t.Fatalf("expected empty permit list after revoke and consume, got %+v", listed)
+	}
+}
+
 func TestPersistAndReloadAdmissionState(t *testing.T) {
 	tempDir := t.TempDir()
 	prevWD, err := os.Getwd()

@@ -15,6 +15,9 @@ func registerAdmissionActions(h *LoginHandler) []core.SubProcessAction {
 		kit.NewAction(actionListPendingRegisters, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 			h.handleListPendingRegisters(ctx, conn, hdr, data)
 		}, kit.WithRequireAuth(true)),
+		kit.NewAction(actionListRegisterPermits, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+			h.handleListRegisterPermits(ctx, conn, hdr, data)
+		}, kit.WithRequireAuth(true)),
 		kit.NewAction(actionApproveRegister, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 			h.handleApproveRegister(ctx, conn, hdr, data)
 		}, kit.WithRequireAuth(true)),
@@ -38,6 +41,22 @@ func (h *LoginHandler) requireActionPermission(conn core.IConnection, hdr core.I
 	return actorID, h.hasPermission(actorID, perm)
 }
 
+func (h *LoginHandler) requireAnyActionPermission(conn core.IConnection, hdr core.IHeader, perms ...string) (uint32, bool) {
+	actorID := permission.SourceNodeID(hdr, conn)
+	if actorID == 0 {
+		return 0, false
+	}
+	for _, perm := range perms {
+		if strings.TrimSpace(perm) == "" {
+			continue
+		}
+		if h.hasPermission(actorID, perm) {
+			return actorID, true
+		}
+	}
+	return actorID, false
+}
+
 func (h *LoginHandler) handleListPendingRegisters(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthPendingList); !ok {
 		h.sendActionData(ctx, conn, hdr, actionListPendingRegistersResp, listPendingRegistersResp{Code: 4403, Msg: "permission denied"}, true)
@@ -52,6 +71,22 @@ func (h *LoginHandler) handleListPendingRegisters(ctx context.Context, conn core
 	}
 	resp := h.listPendingRegisters(req)
 	h.sendActionData(ctx, conn, hdr, actionListPendingRegistersResp, resp, true)
+}
+
+func (h *LoginHandler) handleListRegisterPermits(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+	if _, ok := h.requireAnyActionPermission(conn, hdr, permission.AuthPermitIssue, permission.AuthPermitRevoke); !ok {
+		h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, listRegisterPermitsResp{Code: 4403, Msg: "permission denied"}, true)
+		return
+	}
+	var req listRegisterPermitsReq
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &req); err != nil {
+			h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, listRegisterPermitsResp{Code: 400, Msg: "invalid request"}, true)
+			return
+		}
+	}
+	resp := h.listRegisterPermits(req)
+	h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, resp, true)
 }
 
 func (h *LoginHandler) handleApproveRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
