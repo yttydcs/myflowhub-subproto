@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-03-28_auth-remote-authority-admin.md](2026-03-28_auth-remote-authority-admin.md)
+  - auth remote authority admin：审批与 permit 管理动作复用现有 authority forwarding / targeted response，按真实 `SourceID` 做权限校验。
   - [2026-03-28_subproto-auth-permit-list-runtime.md](2026-03-28_subproto-auth-permit-list-runtime.md)
   - auth register permit list runtime：新增活动 permit list action，复用现有 permit 生命周期，并对缺失 perms 的角色记录做惰性回填。
   - [2026-03-26_auth-semi-central-authority.md](2026-03-26_auth-semi-central-authority.md)

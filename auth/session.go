@@ -123,6 +123,35 @@ func (h *LoginHandler) sourceMatches(conn core.IConnection, hdr core.IHeader) bo
 	return hdr.SourceID() == nid
 }
 
+func (h *LoginHandler) routedSourceMatches(ctx context.Context, conn core.IConnection, hdr core.IHeader) bool {
+	if conn == nil || hdr == nil {
+		return false
+	}
+	sourceID := hdr.SourceID()
+	if sourceID == 0 || isSameConnectionNode(conn, sourceID) {
+		return false
+	}
+	srv := core.ServerFromContext(ctx)
+	if srv == nil || srv.ConnManager() == nil {
+		return false
+	}
+	mapped, ok := srv.ConnManager().GetByNode(sourceID)
+	if !ok || mapped == nil {
+		return false
+	}
+	return mapped.ID() == conn.ID()
+}
+
+func (h *LoginHandler) authSourceAllowed(ctx context.Context, conn core.IConnection, hdr core.IHeader, action string) bool {
+	if h.sourceMatches(conn, hdr) {
+		return true
+	}
+	if !isRemoteAuthorityAdminAction(action) {
+		return false
+	}
+	return h.routedSourceMatches(ctx, conn, hdr)
+}
+
 func normalizeDisplayName(displayName string) string {
 	return strings.TrimSpace(displayName)
 }

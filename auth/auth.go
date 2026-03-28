@@ -215,7 +215,7 @@ func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr
 		h.log.Debug("unknown login action", "action", msg.Action)
 		return
 	}
-	if entry.RequireAuth() && !h.sourceMatches(conn, hdr) {
+	if entry.RequireAuth() && !h.authSourceAllowed(ctx, conn, hdr, msg.Action) {
 		h.log.Warn("drop login action due to source mismatch", "action", msg.Action, "hdr_source", hdr.SourceID())
 		return
 	}
