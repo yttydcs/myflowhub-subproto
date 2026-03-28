@@ -58,10 +58,6 @@ func (h *LoginHandler) requireAnyActionPermission(conn core.IConnection, hdr cor
 }
 
 func (h *LoginHandler) handleListPendingRegisters(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
-	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthPendingList); !ok {
-		h.sendActionData(ctx, conn, hdr, actionListPendingRegistersResp, listPendingRegistersResp{Code: 4403, Msg: "permission denied"}, true)
-		return
-	}
 	var req listPendingRegistersReq
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &req); err != nil {
@@ -69,15 +65,18 @@ func (h *LoginHandler) handleListPendingRegisters(ctx context.Context, conn core
 			return
 		}
 	}
+	if h.tryForwardAdminUpstream(ctx, conn, hdr, actionListPendingRegisters, req, actionListPendingRegistersResp, listPendingRegistersResp{Code: 4500, Msg: "authority unavailable"}) {
+		return
+	}
+	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthPendingList); !ok {
+		h.sendActionData(ctx, conn, hdr, actionListPendingRegistersResp, listPendingRegistersResp{Code: 4403, Msg: "permission denied"}, true)
+		return
+	}
 	resp := h.listPendingRegisters(req)
 	h.sendActionData(ctx, conn, hdr, actionListPendingRegistersResp, resp, true)
 }
 
 func (h *LoginHandler) handleListRegisterPermits(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
-	if _, ok := h.requireAnyActionPermission(conn, hdr, permission.AuthPermitIssue, permission.AuthPermitRevoke); !ok {
-		h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, listRegisterPermitsResp{Code: 4403, Msg: "permission denied"}, true)
-		return
-	}
 	var req listRegisterPermitsReq
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &req); err != nil {
@@ -85,18 +84,32 @@ func (h *LoginHandler) handleListRegisterPermits(ctx context.Context, conn core.
 			return
 		}
 	}
+	if h.tryForwardAdminUpstream(ctx, conn, hdr, actionListRegisterPermits, req, actionListRegisterPermitsResp, listRegisterPermitsResp{Code: 4500, Msg: "authority unavailable"}) {
+		return
+	}
+	if _, ok := h.requireAnyActionPermission(conn, hdr, permission.AuthPermitIssue, permission.AuthPermitRevoke); !ok {
+		h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, listRegisterPermitsResp{Code: 4403, Msg: "permission denied"}, true)
+		return
+	}
 	resp := h.listRegisterPermits(req)
 	h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, resp, true)
 }
 
 func (h *LoginHandler) handleApproveRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
-	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthRegisterApprove); !ok {
-		h.sendActionData(ctx, conn, hdr, actionApproveRegisterResp, approveRegisterResp{Code: 4403, Msg: "permission denied"}, true)
-		return
-	}
 	var req approveRegisterReq
 	if err := json.Unmarshal(data, &req); err != nil || strings.TrimSpace(req.RequestID) == "" {
 		h.sendActionData(ctx, conn, hdr, actionApproveRegisterResp, approveRegisterResp{Code: 400, Msg: "invalid request_id"}, true)
+		return
+	}
+	if h.tryForwardAdminUpstream(ctx, conn, hdr, actionApproveRegister, req, actionApproveRegisterResp, approveRegisterResp{
+		Code:      4500,
+		Msg:       "authority unavailable",
+		RequestID: req.RequestID,
+	}) {
+		return
+	}
+	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthRegisterApprove); !ok {
+		h.sendActionData(ctx, conn, hdr, actionApproveRegisterResp, approveRegisterResp{Code: 4403, Msg: "permission denied"}, true)
 		return
 	}
 	approved, err := h.approvePendingRegister(req.RequestID, req.Role)
@@ -120,13 +133,20 @@ func (h *LoginHandler) handleApproveRegister(ctx context.Context, conn core.ICon
 }
 
 func (h *LoginHandler) handleRejectRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
-	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthRegisterReject); !ok {
-		h.sendActionData(ctx, conn, hdr, actionRejectRegisterResp, rejectRegisterResp{Code: 4403, Msg: "permission denied"}, true)
-		return
-	}
 	var req rejectRegisterReq
 	if err := json.Unmarshal(data, &req); err != nil || strings.TrimSpace(req.RequestID) == "" {
 		h.sendActionData(ctx, conn, hdr, actionRejectRegisterResp, rejectRegisterResp{Code: 400, Msg: "invalid request_id"}, true)
+		return
+	}
+	if h.tryForwardAdminUpstream(ctx, conn, hdr, actionRejectRegister, req, actionRejectRegisterResp, rejectRegisterResp{
+		Code:      4500,
+		Msg:       "authority unavailable",
+		RequestID: req.RequestID,
+	}) {
+		return
+	}
+	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthRegisterReject); !ok {
+		h.sendActionData(ctx, conn, hdr, actionRejectRegisterResp, rejectRegisterResp{Code: 4403, Msg: "permission denied"}, true)
 		return
 	}
 	rejected, err := h.rejectPendingRegister(req.RequestID)
@@ -145,14 +165,22 @@ func (h *LoginHandler) handleRejectRegister(ctx context.Context, conn core.IConn
 }
 
 func (h *LoginHandler) handleIssueRegisterPermit(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
-	actorID, ok := h.requireActionPermission(conn, hdr, permission.AuthPermitIssue)
-	if !ok {
-		h.sendActionData(ctx, conn, hdr, actionIssueRegisterPermitResp, issueRegisterPermitResp{Code: 4403, Msg: "permission denied"}, true)
-		return
-	}
 	var req issueRegisterPermitReq
 	if err := json.Unmarshal(data, &req); err != nil {
 		h.sendActionData(ctx, conn, hdr, actionIssueRegisterPermitResp, issueRegisterPermitResp{Code: 400, Msg: "invalid request"}, true)
+		return
+	}
+	if h.tryForwardAdminUpstream(ctx, conn, hdr, actionIssueRegisterPermit, req, actionIssueRegisterPermitResp, issueRegisterPermitResp{
+		Code:     4500,
+		Msg:      "authority unavailable",
+		DeviceID: strings.TrimSpace(req.DeviceID),
+		Role:     strings.TrimSpace(req.Role),
+	}) {
+		return
+	}
+	actorID, ok := h.requireActionPermission(conn, hdr, permission.AuthPermitIssue)
+	if !ok {
+		h.sendActionData(ctx, conn, hdr, actionIssueRegisterPermitResp, issueRegisterPermitResp{Code: 4403, Msg: "permission denied"}, true)
 		return
 	}
 	record, err := h.issueRegisterPermit(req.DeviceID, req.Role, req.ExpiresAt, actorID)
@@ -171,13 +199,20 @@ func (h *LoginHandler) handleIssueRegisterPermit(ctx context.Context, conn core.
 }
 
 func (h *LoginHandler) handleRevokeRegisterPermit(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
-	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthPermitRevoke); !ok {
-		h.sendActionData(ctx, conn, hdr, actionRevokeRegisterPermitResp, revokeRegisterPermitResp{Code: 4403, Msg: "permission denied"}, true)
-		return
-	}
 	var req revokeRegisterPermitReq
 	if err := json.Unmarshal(data, &req); err != nil || strings.TrimSpace(req.Permit) == "" {
 		h.sendActionData(ctx, conn, hdr, actionRevokeRegisterPermitResp, revokeRegisterPermitResp{Code: 400, Msg: "invalid permit"}, true)
+		return
+	}
+	if h.tryForwardAdminUpstream(ctx, conn, hdr, actionRevokeRegisterPermit, req, actionRevokeRegisterPermitResp, revokeRegisterPermitResp{
+		Code:   4500,
+		Msg:    "authority unavailable",
+		Permit: strings.TrimSpace(req.Permit),
+	}) {
+		return
+	}
+	if _, ok := h.requireActionPermission(conn, hdr, permission.AuthPermitRevoke); !ok {
+		h.sendActionData(ctx, conn, hdr, actionRevokeRegisterPermitResp, revokeRegisterPermitResp{Code: 4403, Msg: "permission denied"}, true)
 		return
 	}
 	record, ok := h.revokeRegisterPermit(req.Permit)

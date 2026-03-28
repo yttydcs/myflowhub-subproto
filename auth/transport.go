@@ -125,8 +125,30 @@ func (h *LoginHandler) sendTargetedResp(ctx context.Context, conn core.IConnecti
 	_ = conn.SendWithHeader(header.BuildTCPResponse(reqHdr, uint32(len(payload)), 2), payload, codec)
 }
 
+func (h *LoginHandler) sendTargetedActionData(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any) {
+	if conn == nil || reqHdr == nil {
+		return
+	}
+	raw, _ := json.Marshal(data)
+	msg := message{Action: action, Data: raw}
+	payload, _ := json.Marshal(msg)
+	respHdr := header.BuildTCPResponse(reqHdr, uint32(len(payload)), 2)
+	if srv := core.ServerFromContext(ctx); srv != nil {
+		if err := srv.Send(ctx, conn.ID(), respHdr, payload); err != nil && h.log != nil {
+			h.log.Warn("send targeted action data failed", "action", action, "err", err)
+		}
+		return
+	}
+	codec := header.HeaderTcpCodec{}
+	_ = conn.SendWithHeader(respHdr, payload, codec)
+}
+
 func (h *LoginHandler) sendActionData(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any, direct bool) {
 	if conn == nil {
+		return
+	}
+	if direct && reqHdr != nil && reqHdr.TargetID() != 0 && h.routedSourceMatches(ctx, conn, reqHdr) {
+		h.sendTargetedActionData(ctx, conn, reqHdr, action, data)
 		return
 	}
 	raw, _ := json.Marshal(data)
