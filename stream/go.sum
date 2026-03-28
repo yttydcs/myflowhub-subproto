@@ -1,0 +1,4 @@
+github.com/yttydcs/myflowhub-core v0.4.0 h1:DEeoS7ED9r+booyIyA3pZm4vWCR0KTwDzboXw3P/qcM=
+github.com/yttydcs/myflowhub-core v0.4.0/go.mod h1:v63nBnLGfsVLtrbnM9jeiTL+s5nWeCOJ9BWeoWtfwc8=
+github.com/yttydcs/myflowhub-proto v0.1.4 h1:iAvyBQGD0UudLA5ELLEx09/t5GehD2qa+dgWZbApADI=
+github.com/yttydcs/myflowhub-proto v0.1.4/go.mod h1:1shJnnAYNZYd1KnGNtvgdygTaeCyx5duMnxrRLRouOc=
