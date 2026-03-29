@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-03-28_stream-module.md](2026-03-28_stream-module.md)
+  - stream module 首版：新增 `stream` 子协议 module，实现 catalog / delivery / CTRL-DATA-ACK 三层运行时与私有 `delivery_*` helper。
   - [2026-03-28_auth-remote-authority-admin.md](2026-03-28_auth-remote-authority-admin.md)
   - auth remote authority admin：审批与 permit 管理动作复用现有 authority forwarding / targeted response，按真实 `SourceID` 做权限校验。
   - [2026-03-28_subproto-auth-permit-list-runtime.md](2026-03-28_subproto-auth-permit-list-runtime.md)
