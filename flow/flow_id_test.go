@@ -147,6 +147,20 @@ func TestFlowHandlersRejectInvalidFlowID(t *testing.T) {
 
 		assertRespCode(t, srv, actionGetResp, 400)
 	})
+
+	t.Run("detail", func(t *testing.T) {
+		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+		req := detailReq{ReqID: "req-detail-invalid-id", FlowID: invalidFlowID, NodeID: "n1"}
+		reqHdr := (&header.HeaderTcp{}).
+			WithMajor(header.MajorCmd).
+			WithSubProto(SubProtoFlow).
+			WithSourceID(2).
+			WithTargetID(1)
+
+		h.handleDetail(ctx, childConn, reqHdr, mustJSON(req))
+
+		assertRespCode(t, srv, actionDetailResp, 400)
+	})
 }
 
 func TestLoadFlowsFromDiskSkipsInvalidFlowID(t *testing.T) {

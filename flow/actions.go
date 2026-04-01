@@ -11,6 +11,7 @@ func registerActions(h *Handler) []core.SubProcessAction {
 		kit.NewAction(actionDelete, h.handleDelete),
 		kit.NewAction(actionRun, h.handleRun),
 		kit.NewAction(actionStatus, h.handleStatus),
+		kit.NewAction(actionDetail, h.handleDetail),
 		kit.NewAction(actionList, h.handleList),
 		kit.NewAction(actionGet, h.handleGet),
 	}

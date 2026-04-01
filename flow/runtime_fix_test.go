@@ -178,6 +178,18 @@ func TestFlowRemoteForwardFailureReturnsResp(t *testing.T) {
 			},
 		},
 		{
+			name:       "detail",
+			wantAction: actionDetailResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleDetail(ctx, conn, hdr, mustJSON(detailReq{
+					ReqID:        "req-detail-remote-fail",
+					FlowID:       "123e4567-e89b-12d3-a456-426614174016",
+					ExecutorNode: 99,
+					NodeID:       "n1",
+				}))
+			},
+		},
+		{
 			name:       "list",
 			wantAction: actionListResp,
 			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {

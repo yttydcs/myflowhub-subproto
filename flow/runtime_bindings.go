@@ -17,6 +17,7 @@ type runContext struct {
 	ExecutorNode uint32                     `json:"executor_node,omitempty"`
 	Trigger      json.RawMessage            `json:"trigger,omitempty"`
 	Nodes        map[string]nodeRuntimeData `json:"nodes,omitempty"`
+	Vars         map[string]varRuntimeData  `json:"vars,omitempty"`
 }
 
 type nodeRuntimeData struct {
@@ -24,6 +25,11 @@ type nodeRuntimeData struct {
 	Code   int             `json:"code,omitempty"`
 	Msg    string          `json:"msg,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+}
+
+type varRuntimeData struct {
+	Value        json.RawMessage `json:"value,omitempty"`
+	WriterNodeID string          `json:"writer_node_id,omitempty"`
 }
 
 type inputBinding struct {
@@ -35,6 +41,7 @@ type inputBinding struct {
 type bindingSource struct {
 	Kind   string `json:"kind"`
 	NodeID string `json:"node_id,omitempty"`
+	Name   string `json:"name,omitempty"`
 	Path   string `json:"path,omitempty"`
 	Field  string `json:"field,omitempty"`
 }
@@ -44,9 +51,16 @@ type composeSpec struct {
 	Inputs   []inputBinding  `json:"inputs,omitempty"`
 }
 
+type setVarSpec struct {
+	Name     string          `json:"name"`
+	Template json.RawMessage `json:"template,omitempty"`
+	Inputs   []inputBinding  `json:"inputs,omitempty"`
+}
+
 type graphIndex struct {
-	nodes     map[string]struct{}
-	ancestors map[string]map[string]struct{}
+	nodes         map[string]struct{}
+	ancestors     map[string]map[string]struct{}
+	setVarWriters map[string][]string
 }
 
 func newRunContext(flowID, runID string, executorNode uint32, triggerCtx json.RawMessage) runContext {
@@ -56,6 +70,7 @@ func newRunContext(flowID, runID string, executorNode uint32, triggerCtx json.Ra
 		ExecutorNode: executorNode,
 		Trigger:      normalizeTriggerContext(triggerCtx),
 		Nodes:        make(map[string]nodeRuntimeData),
+		Vars:         make(map[string]varRuntimeData),
 	}
 }
 
@@ -137,6 +152,22 @@ func (s *runState) setNodeRuntimeLocked(nodeID string, data nodeRuntimeData) {
 	s.runtime.Nodes[nodeID] = data
 }
 
+func (s *runState) setVarRuntimeLocked(name string, data varRuntimeData) {
+	if s == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	if s.runtime.Vars == nil {
+		s.runtime.Vars = make(map[string]varRuntimeData)
+	}
+	data.Value = cloneRawJSON(data.Value)
+	data.WriterNodeID = strings.TrimSpace(data.WriterNodeID)
+	s.runtime.Vars[name] = data
+}
+
 func (s *runState) snapshotNodeStatusesLocked() []nodeStatus {
 	if s == nil {
 		return nil
@@ -196,6 +227,19 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 		runID := s.runtime.RunID
 		s.mu.Unlock()
 		return runID, true, nil
+	case "flow_var":
+		name := strings.TrimSpace(src.Name)
+		if name == "" {
+			return nil, false, errors.New("flow_var name required")
+		}
+		s.mu.Lock()
+		varData, ok := s.runtime.Vars[name]
+		raw := cloneRawJSON(varData.Value)
+		s.mu.Unlock()
+		if !ok || len(raw) == 0 {
+			return nil, false, nil
+		}
+		return readJSONSourceValue(raw, src.Path)
 	default:
 		return nil, false, fmt.Errorf("unsupported binding source kind: %s", kind)
 	}
@@ -213,8 +257,19 @@ func materializeComposeResult(nodeID string, spec composeSpec, state *runState) 
 	return materializeBoundJSON(nodeID, "compose template", spec.Template, spec.Inputs, state)
 }
 
+func materializeSetVarValue(nodeID string, spec setVarSpec, state *runState) (json.RawMessage, error) {
+	return materializeBoundJSONWithNormalizer(nodeID, "set_var template", spec.Template, spec.Inputs, state, normalizeSetVarTemplateJSON)
+}
+
 func materializeBoundJSON(nodeID, label string, base json.RawMessage, bindings []inputBinding, state *runState) (json.RawMessage, error) {
-	normalized, err := normalizeTemplateJSON(base)
+	return materializeBoundJSONWithNormalizer(nodeID, label, base, bindings, state, normalizeTemplateJSON)
+}
+
+func materializeBoundJSONWithNormalizer(nodeID, label string, base json.RawMessage, bindings []inputBinding, state *runState, normalize func(json.RawMessage) (json.RawMessage, error)) (json.RawMessage, error) {
+	if normalize == nil {
+		normalize = normalizeTemplateJSON
+	}
+	normalized, err := normalize(base)
 	if err != nil {
 		return nil, fmt.Errorf("node %s invalid %s: %w", nodeID, label, err)
 	}
@@ -254,8 +309,20 @@ func normalizeTemplateJSON(raw json.RawMessage) (json.RawMessage, error) {
 	if len(trimmed) == 0 {
 		return json.RawMessage(`{}`), nil
 	}
+	return normalizeJSONValue(trimmed)
+}
+
+func normalizeSetVarTemplateJSON(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return json.RawMessage(`null`), nil
+	}
+	return normalizeJSONValue(trimmed)
+}
+
+func normalizeJSONValue(raw json.RawMessage) (json.RawMessage, error) {
 	var doc any
-	if err := json.Unmarshal(trimmed, &doc); err != nil {
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, err
 	}
 	out, _ := json.Marshal(doc)
@@ -282,6 +349,17 @@ func validateComposeSpecForSet(nodeID string, spec composeSpec, idx *graphIndex)
 	}
 	if _, err := normalizeTemplateJSON(spec.Template); err != nil {
 		return fmt.Errorf("node %s invalid compose template", nodeID)
+	}
+	return validateBindings(nodeID, spec.Inputs, idx)
+}
+
+func validateSetVarSpecForSet(nodeID string, spec setVarSpec, idx *graphIndex) error {
+	spec.Name = strings.TrimSpace(spec.Name)
+	if !isValidSetVarName(spec.Name) {
+		return fmt.Errorf("node %s invalid set_var name", nodeID)
+	}
+	if _, err := normalizeSetVarTemplateJSON(spec.Template); err != nil {
+		return fmt.Errorf("node %s invalid set_var template", nodeID)
 	}
 	return validateBindings(nodeID, spec.Inputs, idx)
 }
@@ -319,6 +397,20 @@ func validateBindings(nodeID string, bindings []inputBinding, idx *graphIndex) e
 			if strings.TrimSpace(binding.Source.Field) != "run_id" {
 				return fmt.Errorf("node %s input %d invalid run_meta field", nodeID, i)
 			}
+		case "flow_var":
+			name := strings.TrimSpace(binding.Source.Name)
+			if !isValidSetVarName(name) {
+				return fmt.Errorf("node %s input %d invalid flow_var name", nodeID, i)
+			}
+			if idx == nil {
+				return fmt.Errorf("node %s input %d flow_var requires graph index", nodeID, i)
+			}
+			if _, err := idx.uniqueSetVarWriter(nodeID, name); err != nil {
+				return fmt.Errorf("node %s input %d %w", nodeID, i, err)
+			}
+			if _, err := parseJSONPointer(binding.Source.Path); err != nil {
+				return fmt.Errorf("node %s input %d invalid flow_var path", nodeID, i)
+			}
 		default:
 			return fmt.Errorf("node %s input %d invalid source kind", nodeID, i)
 		}
@@ -332,8 +424,9 @@ func buildGraphIndex(g graph) (*graphIndex, error) {
 		return nil, err
 	}
 	idx := &graphIndex{
-		nodes:     make(map[string]struct{}, len(g.Nodes)),
-		ancestors: make(map[string]map[string]struct{}, len(g.Nodes)),
+		nodes:         make(map[string]struct{}, len(g.Nodes)),
+		ancestors:     make(map[string]map[string]struct{}, len(g.Nodes)),
+		setVarWriters: make(map[string][]string),
 	}
 	parents := make(map[string][]string, len(g.Nodes))
 	for _, n := range g.Nodes {
@@ -384,6 +477,67 @@ func (idx *graphIndex) isAncestor(ancestorNodeID, nodeID string) bool {
 	return ok
 }
 
+func (idx *graphIndex) addSetVarWriter(name, nodeID string) {
+	if idx == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	nodeID = strings.TrimSpace(nodeID)
+	if name == "" || nodeID == "" {
+		return
+	}
+	idx.setVarWriters[name] = append(idx.setVarWriters[name], nodeID)
+}
+
+func (idx *graphIndex) uniqueSetVarWriter(nodeID, name string) (string, error) {
+	if idx == nil {
+		return "", errors.New("graph index required")
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	name = strings.TrimSpace(name)
+	if nodeID == "" || name == "" {
+		return "", errors.New("flow_var name required")
+	}
+	candidates := make([]string, 0, len(idx.setVarWriters[name]))
+	for _, writerNodeID := range idx.setVarWriters[name] {
+		if idx.isAncestor(writerNodeID, nodeID) {
+			candidates = append(candidates, writerNodeID)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("flow_var %q has no ancestor writer", name)
+	}
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
+		switch {
+		case idx.isAncestor(best, candidate):
+			best = candidate
+		case idx.isAncestor(candidate, best):
+		default:
+			sort.Strings(candidates)
+			return "", fmt.Errorf("flow_var %q has ambiguous ancestor writers: %s", name, strings.Join(candidates, ", "))
+		}
+	}
+	return best, nil
+}
+
+func collectSetVarWriters(g graph, idx *graphIndex) error {
+	if idx == nil {
+		return errors.New("graph index required")
+	}
+	for _, n := range g.Nodes {
+		if !strings.EqualFold(strings.TrimSpace(n.Kind), "set_var") {
+			continue
+		}
+		spec, err := decodeNodeSetVarSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", strings.TrimSpace(n.ID), err)
+		}
+		idx.addSetVarWriter(spec.Name, strings.TrimSpace(n.ID))
+	}
+	return nil
+}
+
 func decodeNodeComposeSpec(n node) (composeSpec, error) {
 	var spec composeSpec
 	if err := json.Unmarshal(n.Spec, &spec); err != nil {
@@ -396,6 +550,41 @@ func decodeNodeComposeSpec(n node) (composeSpec, error) {
 		return composeSpec{}, errors.New("invalid compose template")
 	}
 	return spec, nil
+}
+
+func decodeNodeSetVarSpec(n node) (setVarSpec, error) {
+	var spec setVarSpec
+	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+		return setVarSpec{}, errors.New("invalid set_var spec")
+	}
+	spec.Name = strings.TrimSpace(spec.Name)
+	if !isValidSetVarName(spec.Name) {
+		return setVarSpec{}, errors.New("invalid set_var name")
+	}
+	if _, err := normalizeSetVarTemplateJSON(spec.Template); err != nil {
+		return setVarSpec{}, errors.New("invalid set_var template")
+	}
+	return spec, nil
+}
+
+func isValidSetVarName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if i == 0 {
+			if (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') && ch != '_' {
+				return false
+			}
+			continue
+		}
+		if (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func readJSONSourceValue(raw json.RawMessage, path string) (any, bool, error) {

@@ -118,6 +118,131 @@ func TestExecuteFlow_FailsOnMissingRequiredBinding(t *testing.T) {
 	}
 }
 
+func TestExecuteFlow_SetsAndReadsLocalVars(t *testing.T) {
+	h := NewHandler(nil)
+	srv := &testServer{nodeID: 1, cm: connmgr.New()}
+	h.srv = srv
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	flow := setReq{
+		FlowID: "123e4567-e89b-12d3-a456-426614174104",
+		Graph: graph{
+			Nodes: []node{
+				{
+					ID:   "seed",
+					Kind: "set_var",
+					Spec: json.RawMessage(`{"name":"session_payload","template":{"session":{"id":"s-1","version":1}}}`),
+				},
+				{
+					ID:   "refresh",
+					Kind: "set_var",
+					Spec: json.RawMessage(`{"name":"session_payload","template":{"session":{"id":"s-2","version":2}}}`),
+				},
+				{
+					ID:   "send",
+					Kind: "call",
+					Spec: json.RawMessage(`{"method":"debug::echo","args_template":{"payload":null},"inputs":[{"to":"/payload","source":{"kind":"flow_var","name":"session_payload"},"required":true}]}`),
+				},
+			},
+			Edges: []edge{
+				{From: "seed", To: "refresh"},
+				{From: "refresh", To: "send"},
+			},
+		},
+	}
+	state := &runState{
+		flowID: flow.FlowID,
+		runID:  "123e4567-e89b-12d3-a456-426614174105",
+		status: "queued",
+		runtime: newRunContext(
+			flow.FlowID,
+			"123e4567-e89b-12d3-a456-426614174105",
+			1,
+			nil,
+		),
+	}
+
+	h.executeFlow(ctx, flow, state)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.status != "succeeded" {
+		t.Fatalf("expected succeeded, got %s", state.status)
+	}
+	assertJSONEq(t, state.runtime.Nodes["seed"].Result, `{"session":{"id":"s-1","version":1}}`)
+	assertJSONEq(t, state.runtime.Nodes["refresh"].Result, `{"session":{"id":"s-2","version":2}}`)
+	assertJSONEq(t, state.runtime.Nodes["send"].Result, `{"payload":{"session":{"id":"s-2","version":2}}}`)
+
+	gotVar, ok := state.runtime.Vars["session_payload"]
+	if !ok {
+		t.Fatalf("expected session_payload var")
+	}
+	if gotVar.WriterNodeID != "refresh" {
+		t.Fatalf("expected writer refresh, got %s", gotVar.WriterNodeID)
+	}
+	assertJSONEq(t, gotVar.Value, `{"session":{"id":"s-2","version":2}}`)
+}
+
+func TestExecuteFlow_FailsWhenRequiredFlowVarMissingAtRuntime(t *testing.T) {
+	h := NewHandler(nil)
+	srv := &testServer{nodeID: 1, cm: connmgr.New()}
+	h.srv = srv
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	flow := setReq{
+		FlowID: "123e4567-e89b-12d3-a456-426614174106",
+		Graph: graph{
+			Nodes: []node{
+				{
+					ID:        "seed",
+					Kind:      "set_var",
+					AllowFail: true,
+					Spec:      json.RawMessage(`{"name":"session_payload","template":{},"inputs":[{"to":"/id","source":{"kind":"trigger","path":"/missing"},"required":true}]}`),
+				},
+				{
+					ID:   "send",
+					Kind: "call",
+					Spec: json.RawMessage(`{"method":"debug::echo","args_template":{"payload":null},"inputs":[{"to":"/payload","source":{"kind":"flow_var","name":"session_payload"},"required":true}]}`),
+				},
+			},
+			Edges: []edge{{From: "seed", To: "send"}},
+		},
+	}
+	state := &runState{
+		flowID: flow.FlowID,
+		runID:  "123e4567-e89b-12d3-a456-426614174107",
+		status: "queued",
+		runtime: newRunContext(
+			flow.FlowID,
+			"123e4567-e89b-12d3-a456-426614174107",
+			1,
+			json.RawMessage(`{}`),
+		),
+	}
+
+	h.executeFlow(ctx, flow, state)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.status != "failed" {
+		t.Fatalf("expected failed, got %s", state.status)
+	}
+	seedState := state.runtime.Nodes["seed"]
+	if seedState.Status != "failed" || seedState.Code != 400 {
+		t.Fatalf("expected seed failure, got %#v", seedState)
+	}
+	sendState := state.runtime.Nodes["send"]
+	if sendState.Status != "failed" || sendState.Code != 400 {
+		t.Fatalf("expected send failure, got %#v", sendState)
+	}
+	if sendState.Msg == "" {
+		t.Fatalf("expected missing flow_var message")
+	}
+	if _, ok := state.runtime.Vars["session_payload"]; ok {
+		t.Fatalf("unexpected session_payload var after failed writer")
+	}
+}
+
 func assertJSONEq(t *testing.T, raw json.RawMessage, want string) {
 	t.Helper()
 	var gotDoc any

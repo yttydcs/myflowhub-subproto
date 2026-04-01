@@ -14,6 +14,8 @@ const (
 	actionRunResp    = protocol.ActionRunResp
 	actionStatus     = protocol.ActionStatus
 	actionStatusResp = protocol.ActionStatusResp
+	actionDetail     = protocol.ActionDetail
+	actionDetailResp = protocol.ActionDetailResp
 	actionList       = protocol.ActionList
 	actionListResp   = protocol.ActionListResp
 	actionGet        = protocol.ActionGet
@@ -39,6 +41,8 @@ type runResp = protocol.RunResp
 type statusReq = protocol.StatusReq
 type nodeStatus = protocol.NodeStatus
 type statusResp = protocol.StatusResp
+type detailReq = protocol.DetailReq
+type detailResp = protocol.DetailResp
 type listReq = protocol.ListReq
 type flowSummary = protocol.FlowSummary
 type listResp = protocol.ListResp

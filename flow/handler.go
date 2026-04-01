@@ -815,6 +815,159 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 	h.sendStatusResp(ctx, hdr, resp)
 }
 
+func (h *Handler) handleDetail(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+	var req detailReq
+	if err := json.Unmarshal(data, &req); err != nil {
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 400, Msg: "invalid detail"})
+		return
+	}
+	req.ReqID = strings.TrimSpace(req.ReqID)
+	validFlowID, err := validateFlowID(req.FlowID)
+	req.RunID = strings.TrimSpace(req.RunID)
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	req.Path = strings.TrimSpace(req.Path)
+	if req.ReqID == "" {
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 400, Msg: "invalid detail"})
+		return
+	}
+	if err != nil {
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	if req.NodeID == "" {
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 400, Msg: "node_id required"})
+		return
+	}
+	if _, err := parseJSONPointer(req.Path); err != nil {
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 400, Msg: "invalid detail path"})
+		return
+	}
+	req.FlowID = validFlowID
+	srv := h.getServer(ctx)
+	if srv == nil || hdr == nil || conn == nil {
+		return
+	}
+	local := srv.NodeID()
+	executor := req.ExecutorNode
+	if executor == 0 {
+		executor = local
+	}
+	origin := req.OriginNode
+	if origin == 0 {
+		origin = hdr.SourceID()
+	}
+	req.OriginNode = origin
+	req.ExecutorNode = executor
+	if executor != local {
+		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionDetail, Data: mustJSON(req)}, func() {})
+		if code != 0 {
+			h.sendDetailResp(ctx, hdr, detailResp{
+				ReqID:        req.ReqID,
+				Code:         code,
+				Msg:          msgText,
+				ExecutorNode: executor,
+				FlowID:       req.FlowID,
+				RunID:        req.RunID,
+				Path:         req.Path,
+			})
+		}
+		return
+	}
+
+	var state *runState
+	h.mu.Lock()
+	if req.RunID != "" {
+		state = h.runs[req.RunID]
+	} else {
+		state = h.latestRunStateLocked(req.FlowID)
+	}
+	h.mu.Unlock()
+	if state == nil {
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: executor, FlowID: req.FlowID, RunID: req.RunID, Path: req.Path})
+		return
+	}
+
+	state.mu.Lock()
+	if strings.TrimSpace(state.flowID) != req.FlowID {
+		state.mu.Unlock()
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: executor, FlowID: req.FlowID, RunID: req.RunID, Path: req.Path})
+		return
+	}
+	nodeData, ok := state.runtime.Nodes[req.NodeID]
+	resp := detailResp{
+		ReqID:        req.ReqID,
+		Code:         1,
+		Msg:          "ok",
+		ExecutorNode: executor,
+		FlowID:       state.flowID,
+		RunID:        state.runID,
+		Path:         req.Path,
+	}
+	if ok {
+		resp.Node = &nodeStatus{
+			ID:     req.NodeID,
+			Status: nodeData.Status,
+			Code:   nodeData.Code,
+			Msg:    nodeData.Msg,
+		}
+	}
+	raw := cloneRawJSON(nodeData.Result)
+	state.mu.Unlock()
+	if !ok {
+		resp.Code = 404
+		resp.Msg = "not found"
+		h.sendDetailResp(ctx, hdr, resp)
+		return
+	}
+	if req.Path == "" {
+		resp.Result = raw
+		h.sendDetailResp(ctx, hdr, resp)
+		return
+	}
+	if len(raw) == 0 {
+		resp.Code = 404
+		resp.Msg = "not found"
+		h.sendDetailResp(ctx, hdr, resp)
+		return
+	}
+	value, found, err := readJSONSourceValue(raw, req.Path)
+	if err != nil {
+		h.sendDetailResp(ctx, hdr, detailResp{
+			ReqID:        req.ReqID,
+			Code:         500,
+			Msg:          "invalid node result json",
+			ExecutorNode: executor,
+			FlowID:       resp.FlowID,
+			RunID:        resp.RunID,
+			Path:         req.Path,
+			Node:         resp.Node,
+		})
+		return
+	}
+	if !found {
+		resp.Code = 404
+		resp.Msg = "not found"
+		h.sendDetailResp(ctx, hdr, resp)
+		return
+	}
+	result, marshalErr := json.Marshal(value)
+	if marshalErr != nil {
+		h.sendDetailResp(ctx, hdr, detailResp{
+			ReqID:        req.ReqID,
+			Code:         500,
+			Msg:          "detail result marshal failed",
+			ExecutorNode: executor,
+			FlowID:       resp.FlowID,
+			RunID:        resp.RunID,
+			Path:         req.Path,
+			Node:         resp.Node,
+		})
+		return
+	}
+	resp.Result = result
+	h.sendDetailResp(ctx, hdr, resp)
+}
+
 func (h *Handler) handleList(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req listReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -1253,6 +1406,38 @@ func decodeNodeCallSpec(n node) (callSpec, error) {
 }
 
 func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n node) (code int, result json.RawMessage, err error) {
+	nodeID := strings.TrimSpace(n.ID)
+	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	if kind == "compose" {
+		spec, specErr := decodeNodeComposeSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		out, materializeErr := materializeComposeResult(nodeID, spec, state)
+		if materializeErr != nil {
+			return 400, nil, materializeErr
+		}
+		return 1, out, nil
+	}
+	if kind == "set_var" {
+		spec, specErr := decodeNodeSetVarSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		out, materializeErr := materializeSetVarValue(nodeID, spec, state)
+		if materializeErr != nil {
+			return 400, nil, materializeErr
+		}
+		if state != nil {
+			state.mu.Lock()
+			state.setVarRuntimeLocked(spec.Name, varRuntimeData{
+				Value:        out,
+				WriterNodeID: nodeID,
+			})
+			state.mu.Unlock()
+		}
+		return 1, out, nil
+	}
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
 		h.mu.Lock()
@@ -1262,23 +1447,12 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 	if srv == nil {
 		return 500, nil, errors.New("no server")
 	}
-	if strings.EqualFold(strings.TrimSpace(n.Kind), "compose") {
-		spec, specErr := decodeNodeComposeSpec(n)
-		if specErr != nil {
-			return 400, nil, specErr
-		}
-		out, materializeErr := materializeComposeResult(strings.TrimSpace(n.ID), spec, state)
-		if materializeErr != nil {
-			return 400, nil, materializeErr
-		}
-		return 1, out, nil
-	}
 	local := srv.NodeID()
 	spec, specErr := decodeNodeCallSpec(n)
 	if specErr != nil {
 		return 400, nil, specErr
 	}
-	args, materializeErr := materializeCallArgs(strings.TrimSpace(n.ID), spec, state)
+	args, materializeErr := materializeCallArgs(nodeID, spec, state)
 	if materializeErr != nil {
 		return 400, nil, materializeErr
 	}
@@ -1450,6 +1624,17 @@ func (h *Handler) sendStatusResp(ctx context.Context, hdr core.IHeader, resp sta
 		return
 	}
 	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionStatusResp, Data: mustJSON(resp)})
+}
+
+func (h *Handler) sendDetailResp(ctx context.Context, hdr core.IHeader, resp detailResp) {
+	target := uint32(0)
+	if hdr != nil {
+		target = hdr.SourceID()
+	}
+	if target == 0 {
+		return
+	}
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionDetailResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendCtrlToNode(ctx context.Context, target uint32, msg message) {
@@ -1762,6 +1947,9 @@ func validateGraph(g graph) error {
 	if err != nil {
 		return err
 	}
+	if err := collectSetVarWriters(g, idx); err != nil {
+		return err
+	}
 	for _, n := range g.Nodes {
 		if err := validateSetNodeKindAndSpec(strings.TrimSpace(n.ID), n, idx); err != nil {
 			return err
@@ -1785,8 +1973,14 @@ func validateSetNodeKindAndSpec(nodeID string, n node, idx *graphIndex) error {
 			return fmt.Errorf("node %s invalid compose spec", nodeID)
 		}
 		return validateComposeSpecForSet(nodeID, spec, idx)
+	case "set_var":
+		var spec setVarSpec
+		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+			return fmt.Errorf("node %s invalid set_var spec", nodeID)
+		}
+		return validateSetVarSpecForSet(nodeID, spec, idx)
 	default:
-		return fmt.Errorf("node %s kind must be call or compose", nodeID)
+		return fmt.Errorf("node %s kind must be call, compose or set_var", nodeID)
 	}
 }
 

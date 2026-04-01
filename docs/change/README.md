@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-04-02_flow-local-vars-detail-mainline.md](2026-04-02_flow-local-vars-detail-mainline.md)
+  - clean branch 收口 `set_var`、`flow_var`、`detail`，并保留目标测试与基线失败隔离记录。
   - [2026-03-28_stream-module.md](2026-03-28_stream-module.md)
   - stream module 首版：新增 `stream` 子协议 module，实现 catalog / delivery / CTRL-DATA-ACK 三层运行时与私有 `delivery_*` helper。
   - [2026-03-28_auth-remote-authority-admin.md](2026-03-28_auth-remote-authority-admin.md)
