@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-04-02_flow-delete-permission-baseline.md](2026-04-02_flow-delete-permission-baseline.md)
+  - delete 基线修复：对齐 `flow.delete` 测试授权前置，恢复 delete 相关基线回归。
   - [2026-04-02_flow-local-vars-detail-mainline.md](2026-04-02_flow-local-vars-detail-mainline.md)
   - clean branch 收口 `set_var`、`flow_var`、`detail`，并保留目标测试与基线失败隔离记录。
   - [2026-03-28_stream-module.md](2026-03-28_stream-module.md)

@@ -212,8 +212,10 @@ func newDeleteTestEnv(t *testing.T, cfgData map[string]string) (*Handler, *testS
 	t.Helper()
 	if cfgData == nil {
 		cfgData = map[string]string{
-			coreconfig.KeyAuthDefaultRole:  "node",
-			coreconfig.KeyAuthDefaultPerms: "*",
+			// 默认 happy-path 环境显式使用具备 flow.delete 的角色。
+			// 2026-03-26 之后 node 默认角色不再拥有 delete 权限，
+			// 仅设置 auth.default_perms="*" 不会覆盖 role_perms[node]。
+			coreconfig.KeyAuthDefaultRole: "admin",
 		}
 	}
 	cfg := coreconfig.NewMap(cfgData)
