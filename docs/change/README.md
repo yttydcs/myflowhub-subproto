@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-04-02_flow-run-archive-backend-runtime.md](2026-04-02_flow-run-archive-backend-runtime.md)
+  - run archive backend：将 retained archive 抽象为独立 store，默认继续支持 file，`Server` 可选注入 PG。
   - [2026-04-02_flow-run-archive-runtime.md](2026-04-02_flow-run-archive-runtime.md)
   - run archive 首版：为 retained window 内的终态 run 增加 local JSON archive，支持重启后继续查询 recent run。
   - [2026-04-02_flow-trigger-dedup-runtime.md](2026-04-02_flow-trigger-dedup-runtime.md)

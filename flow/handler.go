@@ -31,8 +31,9 @@ import (
 type LocalMethodFunc func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
 
 type HandlerOptions struct {
-	RuntimeDeps runtimedeps.Deps
-	Persistence Persistence
+	RuntimeDeps     runtimedeps.Deps
+	Persistence     Persistence
+	RunArchiveStore RunArchiveStore
 }
 
 type Handler struct {
@@ -45,15 +46,19 @@ type Handler struct {
 
 	mu sync.Mutex
 
-	baseDir         string
-	maxRetainedRuns int
-	runArchive      bool
-	persistence     Persistence
-	explicitStore   bool
-	flows           map[string]setReq
-	runs            map[string]*runState // run_id -> state
-	runOrderByFlow  map[string][]string  // flow_id -> ordered run_ids (oldest -> newest)
-	triggerDedup    map[string]map[string]time.Time
+	baseDir                 string
+	maxRetainedRuns         int
+	runArchive              bool
+	runArchiveBackend       string
+	persistence             Persistence
+	explicitStore           bool
+	runArchiveStore         RunArchiveStore
+	explicitRunArchiveStore bool
+	configErr               error
+	flows                   map[string]setReq
+	runs                    map[string]*runState // run_id -> state
+	runOrderByFlow          map[string][]string  // flow_id -> ordered run_ids (oldest -> newest)
+	triggerDedup            map[string]map[string]time.Time
 
 	schedulers map[string]*flowScheduler // flow_id -> scheduler
 
@@ -71,11 +76,12 @@ type flowScheduler struct {
 type runState struct {
 	mu sync.Mutex
 
-	flowID string
-	runID  string
-	status string
-	start  time.Time
-	end    time.Time
+	flowID       string
+	runID        string
+	status       string
+	start        time.Time
+	end          time.Time
+	archivedAtNs int64
 
 	cancel       context.CancelFunc
 	cancelReason string
@@ -137,20 +143,24 @@ func NewHandlerWithOptions(cfg core.IConfig, opts HandlerOptions, log *slog.Logg
 	deps := runtimedeps.Resolve(cfg, opts.RuntimeDeps)
 	loadedCfg := loadConfig(cfg)
 	h := &Handler{
-		log:             log,
-		cfg:             cfg,
-		baseDir:         loadedCfg.BaseDir,
-		maxRetainedRuns: loadedCfg.MaxRetainedRuns,
-		runArchive:      loadedCfg.RunArchive,
-		persistence:     opts.Persistence,
-		explicitStore:   opts.Persistence != nil,
-		flows:           make(map[string]setReq),
-		runs:            make(map[string]*runState),
-		runOrderByFlow:  make(map[string][]string),
-		triggerDedup:    make(map[string]map[string]time.Time),
-		schedulers:      make(map[string]*flowScheduler),
-		localMethods:    make(map[string]LocalMethodFunc),
-		capRegistry:     deps.CapRegistry,
+		log:                     log,
+		cfg:                     cfg,
+		baseDir:                 loadedCfg.BaseDir,
+		maxRetainedRuns:         loadedCfg.MaxRetainedRuns,
+		runArchive:              loadedCfg.RunArchive,
+		runArchiveBackend:       loadedCfg.RunArchiveBackend,
+		persistence:             opts.Persistence,
+		explicitStore:           opts.Persistence != nil,
+		runArchiveStore:         opts.RunArchiveStore,
+		explicitRunArchiveStore: opts.RunArchiveStore != nil,
+		configErr:               loadedCfg.ConfigErr,
+		flows:                   make(map[string]setReq),
+		runs:                    make(map[string]*runState),
+		runOrderByFlow:          make(map[string][]string),
+		triggerDedup:            make(map[string]map[string]time.Time),
+		schedulers:              make(map[string]*flowScheduler),
+		localMethods:            make(map[string]LocalMethodFunc),
+		capRegistry:             deps.CapRegistry,
 	}
 	h.permCfg = deps.PermConfig
 	// 内置 local 方法：debug::echo / debug::fail
@@ -186,11 +196,21 @@ func (h *Handler) Init() bool {
 	h.baseDir = cfg.BaseDir
 	h.maxRetainedRuns = cfg.MaxRetainedRuns
 	h.runArchive = cfg.RunArchive
+	h.runArchiveBackend = cfg.RunArchiveBackend
+	h.configErr = cfg.ConfigErr
+	if h.configErr != nil {
+		h.log.Warn("flow config invalid", "err", h.configErr)
+		return false
+	}
+	if h.runArchiveBackend == runArchiveBackendPG && !h.explicitRunArchiveStore {
+		h.log.Warn("flow run archive backend requires injected store", "backend", h.runArchiveBackend)
+		return false
+	}
 	if err := h.loadFlowsFromDisk(); err != nil {
 		h.log.Warn("flow load persisted state failed", "err", err)
 		return false
 	}
-	if err := h.loadArchivedRunsFromDisk(); err != nil {
+	if err := h.loadArchivedRuns(); err != nil {
 		h.log.Warn("flow load archived runs failed", "err", err)
 	}
 	h.initActions()
@@ -2084,6 +2104,23 @@ func (h *Handler) currentPersistenceLocked() Persistence {
 		return h.persistence
 	}
 	return NewJSONPersistence(h.baseDir)
+}
+
+func (h *Handler) currentRunArchiveStoreLocked() RunArchiveStore {
+	if !h.runArchive {
+		return nil
+	}
+	if h.explicitRunArchiveStore && h.runArchiveStore != nil {
+		return h.runArchiveStore
+	}
+	switch strings.TrimSpace(h.runArchiveBackend) {
+	case "", runArchiveBackendOff, runArchiveBackendFile:
+		return NewFileRunArchiveStore(h.baseDir)
+	case runArchiveBackendPG:
+		return nil
+	default:
+		return nil
+	}
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

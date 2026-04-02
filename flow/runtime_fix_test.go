@@ -501,8 +501,8 @@ func TestFlowRunArchiveReloadsRetainedRunsFromDisk(t *testing.T) {
 	reloaded.baseDir = baseDir
 	reloaded.runArchive = true
 	reloaded.maxRetainedRuns = 2
-	if err := reloaded.loadArchivedRunsFromDisk(); err != nil {
-		t.Fatalf("loadArchivedRunsFromDisk err=%v", err)
+	if err := reloaded.loadArchivedRuns(); err != nil {
+		t.Fatalf("loadArchivedRuns err=%v", err)
 	}
 
 	reqHdr := (&header.HeaderTcp{}).
@@ -569,8 +569,8 @@ func TestFlowRunArchivePrunesOldArchiveFiles(t *testing.T) {
 	reloaded.baseDir = baseDir
 	reloaded.runArchive = true
 	reloaded.maxRetainedRuns = 2
-	if err := reloaded.loadArchivedRunsFromDisk(); err != nil {
-		t.Fatalf("loadArchivedRunsFromDisk err=%v", err)
+	if err := reloaded.loadArchivedRuns(); err != nil {
+		t.Fatalf("loadArchivedRuns err=%v", err)
 	}
 
 	reqHdr := (&header.HeaderTcp{}).
@@ -623,8 +623,8 @@ func TestFlowDeleteKeepsArchivedRunsAfterReload(t *testing.T) {
 	reloaded.baseDir = baseDir
 	reloaded.runArchive = true
 	reloaded.maxRetainedRuns = 2
-	if err := reloaded.loadArchivedRunsFromDisk(); err != nil {
-		t.Fatalf("loadArchivedRunsFromDisk err=%v", err)
+	if err := reloaded.loadArchivedRuns(); err != nil {
+		t.Fatalf("loadArchivedRuns err=%v", err)
 	}
 
 	reloaded.handleListRuns(ctx, childConn, reqHdr, mustJSON(listRunsReq{
