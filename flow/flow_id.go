@@ -20,6 +20,17 @@ func validateFlowID(raw string) (string, error) {
 	return flowID, nil
 }
 
+func validateRunID(raw string) (string, error) {
+	runID := strings.TrimSpace(raw)
+	if runID == "" {
+		return "", errors.New("run_id required")
+	}
+	if !flowIDPattern.MatchString(runID) {
+		return "", errors.New("run_id must be uuid")
+	}
+	return runID, nil
+}
+
 func flowFilePath(baseDir, flowID string) (string, error) {
 	baseDir = strings.TrimSpace(baseDir)
 	if baseDir == "" {

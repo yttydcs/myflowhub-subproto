@@ -208,6 +208,306 @@ func TestFlowDeleteInterruptsActiveRun(t *testing.T) {
 	t.Fatalf("run status did not become cancelled")
 }
 
+func TestFlowCancelRunSuccess(t *testing.T) {
+	h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+	entered := make(chan struct{}, 1)
+	stopped := make(chan struct{}, 1)
+	h.RegisterLocalMethod("test::wait", func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		select {
+		case stopped <- struct{}{}:
+		default:
+		}
+		return nil, ctx.Err()
+	})
+
+	flowID := "123e4567-e89b-12d3-a456-426614174003"
+	timeoutMs := 10_000
+	retry := 0
+	flowDef := setReq{
+		FlowID: flowID,
+		Graph: graph{
+			Nodes: []node{
+				{
+					ID:        "n1",
+					Kind:      "call",
+					Retry:     &retry,
+					TimeoutMs: &timeoutMs,
+					Spec:      json.RawMessage(`{"method":"test::wait"}`),
+				},
+			},
+		},
+	}
+	h.flows[flowID] = flowDef
+
+	runID := h.enqueueRun(context.Background(), flowDef)
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("run did not enter blocking node")
+	}
+
+	req := cancelRunReq{ReqID: "req-cancel-ok", FlowID: flowID, RunID: runID}
+	reqHdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(SubProtoFlow).
+		WithSourceID(2).
+		WithTargetID(1)
+	h.handleCancelRun(ctx, childConn, reqHdr, mustJSON(req))
+
+	if len(srv.sends) == 0 {
+		t.Fatalf("expected cancel_run response frame")
+	}
+	resp := mustDecodeCancelRunResp(t, srv.sends[len(srv.sends)-1].payload)
+	if resp.Code != 1 || resp.FlowID != flowID || resp.RunID != runID || resp.Status != "cancelled" {
+		t.Fatalf("unexpected cancel_run resp: %#v", resp)
+	}
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("run was not interrupted by cancel_run")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	cancelled := false
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		st := h.runs[runID]
+		_, flowExists := h.flows[flowID]
+		h.mu.Unlock()
+		if st == nil {
+			t.Fatalf("run state missing: %s", runID)
+		}
+		st.mu.Lock()
+		status := st.status
+		reason := st.cancelReason
+		st.mu.Unlock()
+		if status == "cancelled" {
+			if reason != runCancelMsgManual {
+				t.Fatalf("unexpected cancel reason: %q", reason)
+			}
+			if !flowExists {
+				t.Fatalf("flow definition should remain after cancel_run")
+			}
+			cancelled = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !cancelled {
+		t.Fatalf("run status did not become cancelled after cancel_run")
+	}
+
+	srv.sends = nil
+	h.handleStatus(ctx, childConn, reqHdr, mustJSON(statusReq{
+		ReqID:  "req-status-after-cancel",
+		FlowID: flowID,
+		RunID:  runID,
+	}))
+	statusResp := mustDecodeStatusResp(t, srv.sends[len(srv.sends)-1].payload)
+	if statusResp.Code != 1 || statusResp.Status != "cancelled" || statusResp.Msg != runCancelMsgManual {
+		t.Fatalf("unexpected status after cancel_run: %#v", statusResp)
+	}
+
+	srv.sends = nil
+	h.handleDetail(ctx, childConn, reqHdr, mustJSON(detailReq{
+		ReqID:  "req-detail-after-cancel",
+		FlowID: flowID,
+		RunID:  runID,
+		NodeID: "n1",
+	}))
+	detailResp := mustDecodeDetailResp(t, srv.sends[len(srv.sends)-1].payload)
+	if detailResp.Code != 1 || detailResp.Msg != runCancelMsgManual {
+		t.Fatalf("unexpected detail after cancel_run: %#v", detailResp)
+	}
+	if detailResp.Node == nil || detailResp.Node.Status != "cancelled" || detailResp.Node.Msg != runCancelMsgManual {
+		t.Fatalf("unexpected detail node after cancel_run: %#v", detailResp.Node)
+	}
+}
+
+func TestFlowCancelRunNotFoundOrTerminal(t *testing.T) {
+	t.Run("not found", func(t *testing.T) {
+		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+		reqHdr := (&header.HeaderTcp{}).
+			WithMajor(header.MajorCmd).
+			WithSubProto(SubProtoFlow).
+			WithSourceID(2).
+			WithTargetID(1)
+
+		h.handleCancelRun(ctx, childConn, reqHdr, mustJSON(cancelRunReq{
+			ReqID:  "req-cancel-missing",
+			FlowID: "123e4567-e89b-12d3-a456-426614174004",
+			RunID:  "123e4567-e89b-12d3-a456-426614174104",
+		}))
+
+		assertRespCode(t, srv, actionCancelRunResp, 404)
+	})
+
+	t.Run("flow mismatch", func(t *testing.T) {
+		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+		runID := "123e4567-e89b-12d3-a456-426614174105"
+		state := &runState{
+			flowID:  "123e4567-e89b-12d3-a456-426614174005",
+			runID:   runID,
+			status:  "running",
+			cancel:  func() {},
+			runtime: newRunContext("123e4567-e89b-12d3-a456-426614174005", runID, 1, nil),
+		}
+		h.runs[runID] = state
+		h.runOrderByFlow[state.flowID] = []string{runID}
+
+		reqHdr := (&header.HeaderTcp{}).
+			WithMajor(header.MajorCmd).
+			WithSubProto(SubProtoFlow).
+			WithSourceID(2).
+			WithTargetID(1)
+		h.handleCancelRun(ctx, childConn, reqHdr, mustJSON(cancelRunReq{
+			ReqID:  "req-cancel-flow-mismatch",
+			FlowID: "123e4567-e89b-12d3-a456-426614174006",
+			RunID:  runID,
+		}))
+
+		assertRespCode(t, srv, actionCancelRunResp, 404)
+	})
+
+	t.Run("terminal", func(t *testing.T) {
+		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+		flowID := "123e4567-e89b-12d3-a456-426614174007"
+		runID := "123e4567-e89b-12d3-a456-426614174107"
+		state := &runState{
+			flowID:  flowID,
+			runID:   runID,
+			status:  "succeeded",
+			runtime: newRunContext(flowID, runID, 1, nil),
+		}
+		h.runs[runID] = state
+		h.runOrderByFlow[flowID] = []string{runID}
+
+		reqHdr := (&header.HeaderTcp{}).
+			WithMajor(header.MajorCmd).
+			WithSubProto(SubProtoFlow).
+			WithSourceID(2).
+			WithTargetID(1)
+		h.handleCancelRun(ctx, childConn, reqHdr, mustJSON(cancelRunReq{
+			ReqID:  "req-cancel-terminal",
+			FlowID: flowID,
+			RunID:  runID,
+		}))
+
+		resp := mustDecodeCancelRunResp(t, srv.sends[len(srv.sends)-1].payload)
+		if resp.Code != 409 || resp.Status != "succeeded" {
+			t.Fatalf("unexpected terminal cancel_run resp: %#v", resp)
+		}
+	})
+}
+
+func TestFlowRunReadPermissionDenied(t *testing.T) {
+	type testCase struct {
+		name       string
+		wantAction string
+		invoke     func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader)
+	}
+
+	cfgData := map[string]string{
+		coreconfig.KeyAuthDefaultRole: "node",
+		coreconfig.KeyAuthRolePerms:   "node:flow.set",
+	}
+	cases := []testCase{
+		{
+			name:       "run",
+			wantAction: actionRunResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleRun(ctx, conn, hdr, mustJSON(runReq{
+					ReqID:  "req-run-deny",
+					FlowID: "123e4567-e89b-12d3-a456-426614174108",
+				}))
+			},
+		},
+		{
+			name:       "cancel_run",
+			wantAction: actionCancelRunResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleCancelRun(ctx, conn, hdr, mustJSON(cancelRunReq{
+					ReqID:  "req-cancel-deny",
+					FlowID: "123e4567-e89b-12d3-a456-426614174109",
+					RunID:  "123e4567-e89b-12d3-a456-426614174209",
+				}))
+			},
+		},
+		{
+			name:       "status",
+			wantAction: actionStatusResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleStatus(ctx, conn, hdr, mustJSON(statusReq{
+					ReqID:  "req-status-deny",
+					FlowID: "123e4567-e89b-12d3-a456-426614174110",
+				}))
+			},
+		},
+		{
+			name:       "detail",
+			wantAction: actionDetailResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleDetail(ctx, conn, hdr, mustJSON(detailReq{
+					ReqID:  "req-detail-deny",
+					FlowID: "123e4567-e89b-12d3-a456-426614174111",
+					NodeID: "n1",
+				}))
+			},
+		},
+		{
+			name:       "list_runs",
+			wantAction: actionListRunsResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleListRuns(ctx, conn, hdr, mustJSON(listRunsReq{
+					ReqID:  "req-list-runs-deny",
+					FlowID: "123e4567-e89b-12d3-a456-426614174112",
+				}))
+			},
+		},
+		{
+			name:       "list",
+			wantAction: actionListResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleList(ctx, conn, hdr, mustJSON(listReq{
+					ReqID: "req-list-deny",
+				}))
+			},
+		},
+		{
+			name:       "get",
+			wantAction: actionGetResp,
+			invoke: func(h *Handler, ctx context.Context, conn *mockConnection, hdr core.IHeader) {
+				h.handleGet(ctx, conn, hdr, mustJSON(getReq{
+					ReqID:  "req-get-deny",
+					FlowID: "123e4567-e89b-12d3-a456-426614174113",
+				}))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, srv, childConn, ctx, _ := newDeleteTestEnv(t, cfgData)
+			reqHdr := (&header.HeaderTcp{}).
+				WithMajor(header.MajorCmd).
+				WithSubProto(SubProtoFlow).
+				WithSourceID(2).
+				WithTargetID(1)
+
+			tc.invoke(h, ctx, childConn, reqHdr)
+
+			assertRespCode(t, srv, tc.wantAction, 403)
+		})
+	}
+}
+
 func newDeleteTestEnv(t *testing.T, cfgData map[string]string) (*Handler, *testServer, *mockConnection, context.Context, string) {
 	t.Helper()
 	if cfgData == nil {
@@ -248,6 +548,22 @@ func mustDecodeDeleteResp(t *testing.T, payload []byte) deleteResp {
 	var resp deleteResp
 	if err := json.Unmarshal(env.Data, &resp); err != nil {
 		t.Fatalf("decode delete response err=%v", err)
+	}
+	return resp
+}
+
+func mustDecodeCancelRunResp(t *testing.T, payload []byte) cancelRunResp {
+	t.Helper()
+	var env message
+	if err := json.Unmarshal(payload, &env); err != nil {
+		t.Fatalf("decode response envelope err=%v", err)
+	}
+	if env.Action != actionCancelRunResp {
+		t.Fatalf("unexpected action=%s", env.Action)
+	}
+	var resp cancelRunResp
+	if err := json.Unmarshal(env.Data, &resp); err != nil {
+		t.Fatalf("decode cancel_run response err=%v", err)
 	}
 	return resp
 }

@@ -6,25 +6,31 @@ import protocol "github.com/yttydcs/myflowhub-proto/protocol/flow"
 const SubProtoFlow uint8 = protocol.SubProtoFlow
 
 const (
-	actionSet        = protocol.ActionSet
-	actionSetResp    = protocol.ActionSetResp
-	actionDelete     = protocol.ActionDelete
-	actionDeleteResp = protocol.ActionDeleteResp
-	actionRun        = protocol.ActionRun
-	actionRunResp    = protocol.ActionRunResp
-	actionStatus     = protocol.ActionStatus
-	actionStatusResp = protocol.ActionStatusResp
-	actionDetail     = protocol.ActionDetail
-	actionDetailResp = protocol.ActionDetailResp
-	actionList       = protocol.ActionList
-	actionListResp   = protocol.ActionListResp
-	actionGet        = protocol.ActionGet
-	actionGetResp    = protocol.ActionGetResp
+	actionSet           = protocol.ActionSet
+	actionSetResp       = protocol.ActionSetResp
+	actionDelete        = protocol.ActionDelete
+	actionDeleteResp    = protocol.ActionDeleteResp
+	actionRun           = protocol.ActionRun
+	actionRunResp       = protocol.ActionRunResp
+	actionCancelRun     = protocol.ActionCancelRun
+	actionCancelRunResp = protocol.ActionCancelRunResp
+	actionStatus        = protocol.ActionStatus
+	actionStatusResp    = protocol.ActionStatusResp
+	actionDetail        = protocol.ActionDetail
+	actionDetailResp    = protocol.ActionDetailResp
+	actionListRuns      = protocol.ActionListRuns
+	actionListRunsResp  = protocol.ActionListRunsResp
+	actionList          = protocol.ActionList
+	actionListResp      = protocol.ActionListResp
+	actionGet           = protocol.ActionGet
+	actionGetResp       = protocol.ActionGetResp
 )
 
 const (
 	permFlowSet    = protocol.PermFlowSet
 	permFlowDelete = protocol.PermFlowDelete
+	permFlowRun    = protocol.PermFlowRun
+	permFlowRead   = protocol.PermFlowRead
 )
 
 type message = protocol.Message
@@ -38,11 +44,16 @@ type deleteReq = protocol.DeleteReq
 type deleteResp = protocol.DeleteResp
 type runReq = protocol.RunReq
 type runResp = protocol.RunResp
+type cancelRunReq = protocol.CancelRunReq
+type cancelRunResp = protocol.CancelRunResp
 type statusReq = protocol.StatusReq
 type nodeStatus = protocol.NodeStatus
 type statusResp = protocol.StatusResp
 type detailReq = protocol.DetailReq
 type detailResp = protocol.DetailResp
+type listRunsReq = protocol.ListRunsReq
+type runSummary = protocol.RunSummary
+type listRunsResp = protocol.ListRunsResp
 type listReq = protocol.ListReq
 type flowSummary = protocol.FlowSummary
 type listResp = protocol.ListResp

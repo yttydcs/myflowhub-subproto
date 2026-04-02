@@ -33,9 +33,12 @@ func TestFlowRegistersCapabilityRun(t *testing.T) {
 	}
 
 	reg := execcap.SharedRegistry(cfg)
-	_, invoke, ok := reg.Lookup(capabilityMethodRun, "")
+	desc, invoke, ok := reg.Lookup(capabilityMethodRun, "")
 	if !ok || invoke == nil {
 		t.Fatalf("expected flow::run capability registered")
+	}
+	if len(desc.Permissions) != 1 || desc.Permissions[0] != permFlowRun {
+		t.Fatalf("unexpected flow::run permissions=%v", desc.Permissions)
 	}
 
 	raw, err := invoke(context.Background(), json.RawMessage(`{"flow_id":"123e4567-e89b-12d3-a456-426614174003"}`))
@@ -76,9 +79,12 @@ func TestFlowCapabilityRunValidatesArgs(t *testing.T) {
 	cfg := coreconfig.NewMap(map[string]string{})
 	NewHandlerWithConfig(cfg, nil)
 	reg := execcap.SharedRegistry(cfg)
-	_, invoke, ok := reg.Lookup(capabilityMethodRun, "")
+	desc, invoke, ok := reg.Lookup(capabilityMethodRun, "")
 	if !ok || invoke == nil {
 		t.Fatalf("expected flow::run capability registered")
+	}
+	if len(desc.Permissions) != 1 || desc.Permissions[0] != permFlowRun {
+		t.Fatalf("unexpected flow::run permissions=%v", desc.Permissions)
 	}
 
 	_, err := invoke(context.Background(), json.RawMessage(`{"flow_id":""}`))

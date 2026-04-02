@@ -53,6 +53,22 @@ func TestValidateGraphRejectsLegacyKind(t *testing.T) {
 	}
 }
 
+func TestValidateGraphRejectsNegativeRetryBackoff(t *testing.T) {
+	backoff := -1
+	g := graph{
+		Nodes: []node{
+			{ID: "A", Kind: "call", RetryBackoffMs: &backoff, Spec: []byte(`{"method":"debug::echo"}`)},
+		},
+	}
+	err := validateGraph(g)
+	if err == nil {
+		t.Fatalf("expected err, got nil")
+	}
+	if !strings.Contains(err.Error(), "retry_backoff_ms must be >= 0") {
+		t.Fatalf("unexpected err=%v", err)
+	}
+}
+
 func TestValidateGraphRejectsUnknownBindingNode(t *testing.T) {
 	g := graph{
 		Nodes: []node{
