@@ -120,6 +120,24 @@ func TestFlowHandlersRejectInvalidFlowID(t *testing.T) {
 		assertRespCode(t, srv, actionRunResp, 400)
 	})
 
+	t.Run("cancel_run", func(t *testing.T) {
+		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+		req := cancelRunReq{
+			ReqID:  "req-cancel-invalid-flow-id",
+			FlowID: invalidFlowID,
+			RunID:  "123e4567-e89b-12d3-a456-426614174118",
+		}
+		reqHdr := (&header.HeaderTcp{}).
+			WithMajor(header.MajorCmd).
+			WithSubProto(SubProtoFlow).
+			WithSourceID(2).
+			WithTargetID(1)
+
+		h.handleCancelRun(ctx, childConn, reqHdr, mustJSON(req))
+
+		assertRespCode(t, srv, actionCancelRunResp, 400)
+	})
+
 	t.Run("status", func(t *testing.T) {
 		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
 		req := statusReq{ReqID: "req-status-invalid-id", FlowID: invalidFlowID}
@@ -161,6 +179,96 @@ func TestFlowHandlersRejectInvalidFlowID(t *testing.T) {
 
 		assertRespCode(t, srv, actionDetailResp, 400)
 	})
+
+	t.Run("list_runs", func(t *testing.T) {
+		h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+		req := listRunsReq{ReqID: "req-list-runs-invalid-id", FlowID: invalidFlowID}
+		reqHdr := (&header.HeaderTcp{}).
+			WithMajor(header.MajorCmd).
+			WithSubProto(SubProtoFlow).
+			WithSourceID(2).
+			WithTargetID(1)
+
+		h.handleListRuns(ctx, childConn, reqHdr, mustJSON(req))
+
+		assertRespCode(t, srv, actionListRunsResp, 400)
+	})
+}
+
+func TestFlowCancelRunRejectsInvalidRunID(t *testing.T) {
+	h, srv, childConn, ctx, _ := newDeleteTestEnv(t, nil)
+	req := cancelRunReq{
+		ReqID:  "req-cancel-invalid-run-id",
+		FlowID: "123e4567-e89b-12d3-a456-426614174008",
+		RunID:  "not-a-uuid",
+	}
+	reqHdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(SubProtoFlow).
+		WithSourceID(2).
+		WithTargetID(1)
+
+	h.handleCancelRun(ctx, childConn, reqHdr, mustJSON(req))
+
+	assertRespCode(t, srv, actionCancelRunResp, 400)
+}
+
+func TestFlowSetRejectsNegativeMaxActiveRuns(t *testing.T) {
+	h, srv, childConn, ctx, baseDir := newDeleteTestEnv(t, nil)
+	negativeOne := -1
+	req := setReq{
+		ReqID:         "req-set-negative-max-active-runs",
+		FlowID:        "123e4567-e89b-12d3-a456-426614174124",
+		MaxActiveRuns: &negativeOne,
+		Trigger: trigger{
+			Type:    "interval",
+			EveryMs: 1000,
+		},
+		Graph: graph{
+			Nodes: []node{
+				{ID: "n1", Kind: "call", Spec: json.RawMessage(`{"method":"debug::echo"}`)},
+			},
+		},
+	}
+	reqHdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(SubProtoFlow).
+		WithSourceID(2).
+		WithTargetID(1)
+
+	h.handleSet(ctx, childConn, reqHdr, mustJSON(req))
+
+	assertRespCode(t, srv, actionSetResp, 400)
+	assertDirEmpty(t, baseDir)
+}
+
+func TestFlowSetRejectsNegativeTriggerDedupWindowMs(t *testing.T) {
+	h, srv, childConn, ctx, baseDir := newDeleteTestEnv(t, nil)
+	negativeOne := -1
+	req := setReq{
+		ReqID:  "req-set-negative-trigger-dedup-window",
+		FlowID: "123e4567-e89b-12d3-a456-426614174130",
+		Trigger: trigger{
+			Type:          "event",
+			EventName:     "alarm",
+			DedupWindowMs: &negativeOne,
+		},
+		Graph: graph{
+			Nodes: []node{
+				{ID: "n1", Kind: "call", Spec: json.RawMessage(`{"method":"debug::echo"}`)},
+			},
+		},
+	}
+	reqHdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(SubProtoFlow).
+		WithSourceID(2).
+		WithTargetID(1)
+
+	h.handleSet(ctx, childConn, reqHdr, mustJSON(req))
+
+	assertRespCode(t, srv, actionSetResp, 400)
+	assertDirEmpty(t, baseDir)
 }
 
 func TestLoadFlowsFromDiskSkipsInvalidFlowID(t *testing.T) {
@@ -227,6 +335,72 @@ func TestLoadFlowsFromDiskKeepsLegacyKindsForCompatibility(t *testing.T) {
 	}
 	if !strings.EqualFold(loaded.Graph.Nodes[0].Kind, "local") {
 		t.Fatalf("expected legacy node kind preserved, got=%q", loaded.Graph.Nodes[0].Kind)
+	}
+}
+
+func TestLoadFlowsFromDiskSkipsNegativeMaxActiveRuns(t *testing.T) {
+	h := NewHandler(nil)
+	h.baseDir = t.TempDir()
+	flowID := "123e4567-e89b-12d3-a456-426614174125"
+	negativeOne := -1
+
+	raw, err := json.Marshal(setReq{
+		FlowID:        flowID,
+		MaxActiveRuns: &negativeOne,
+		Trigger: trigger{
+			Type:    "interval",
+			EveryMs: 1000,
+		},
+		Graph: graph{
+			Nodes: []node{
+				{ID: "n1", Kind: "call", Spec: json.RawMessage(`{"method":"debug::echo"}`)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal invalid flow err=%v", err)
+	}
+	if err := os.WriteFile(filepath.Join(h.baseDir, flowID+".json"), raw, 0o644); err != nil {
+		t.Fatalf("write invalid flow file err=%v", err)
+	}
+
+	h.loadFlowsFromDisk()
+
+	if len(h.flows) != 0 {
+		t.Fatalf("expected flow with negative max_active_runs to be skipped, got=%d", len(h.flows))
+	}
+}
+
+func TestLoadFlowsFromDiskSkipsNegativeTriggerDedupWindowMs(t *testing.T) {
+	h := NewHandler(nil)
+	h.baseDir = t.TempDir()
+	flowID := "123e4567-e89b-12d3-a456-426614174131"
+	negativeOne := -1
+
+	raw, err := json.Marshal(setReq{
+		FlowID: flowID,
+		Trigger: trigger{
+			Type:          "event",
+			EventName:     "alarm",
+			DedupWindowMs: &negativeOne,
+		},
+		Graph: graph{
+			Nodes: []node{
+				{ID: "n1", Kind: "call", Spec: json.RawMessage(`{"method":"debug::echo"}`)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal invalid flow err=%v", err)
+	}
+	if err := os.WriteFile(filepath.Join(h.baseDir, flowID+".json"), raw, 0o644); err != nil {
+		t.Fatalf("write invalid flow file err=%v", err)
+	}
+
+	h.loadFlowsFromDisk()
+
+	if len(h.flows) != 0 {
+		t.Fatalf("expected flow with negative trigger dedup window to be skipped, got=%d", len(h.flows))
 	}
 }
 

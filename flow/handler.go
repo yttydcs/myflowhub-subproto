@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -46,11 +47,13 @@ type Handler struct {
 
 	baseDir         string
 	maxRetainedRuns int
+	runArchive      bool
 	persistence     Persistence
 	explicitStore   bool
 	flows           map[string]setReq
 	runs            map[string]*runState // run_id -> state
 	runOrderByFlow  map[string][]string  // flow_id -> ordered run_ids (oldest -> newest)
+	triggerDedup    map[string]map[string]time.Time
 
 	schedulers map[string]*flowScheduler // flow_id -> scheduler
 
@@ -79,6 +82,8 @@ type runState struct {
 	runtime      runContext
 }
 
+type runStartSource string
+
 const (
 	triggerTypeInterval   = "interval"
 	triggerTypeEvent      = "event"
@@ -91,7 +96,11 @@ const (
 	capabilityProviderFlow = "flow"
 	capabilityMethodRun    = "flow::run"
 
+	runCancelMsgCancelled   = "cancelled"
 	runCancelMsgFlowDeleted = "interrupted by flow delete"
+	runCancelMsgManual      = "cancelled by cancel_run"
+	runStartSourceManual    = runStartSource("manual")
+	runStartSourceTrigger   = runStartSource("trigger")
 
 	varChangeOpChanged = "changed"
 	varChangeOpDeleted = "deleted"
@@ -132,11 +141,13 @@ func NewHandlerWithOptions(cfg core.IConfig, opts HandlerOptions, log *slog.Logg
 		cfg:             cfg,
 		baseDir:         loadedCfg.BaseDir,
 		maxRetainedRuns: loadedCfg.MaxRetainedRuns,
+		runArchive:      loadedCfg.RunArchive,
 		persistence:     opts.Persistence,
 		explicitStore:   opts.Persistence != nil,
 		flows:           make(map[string]setReq),
 		runs:            make(map[string]*runState),
 		runOrderByFlow:  make(map[string][]string),
+		triggerDedup:    make(map[string]map[string]time.Time),
 		schedulers:      make(map[string]*flowScheduler),
 		localMethods:    make(map[string]LocalMethodFunc),
 		capRegistry:     deps.CapRegistry,
@@ -174,9 +185,13 @@ func (h *Handler) Init() bool {
 	cfg := loadConfig(h.cfg)
 	h.baseDir = cfg.BaseDir
 	h.maxRetainedRuns = cfg.MaxRetainedRuns
+	h.runArchive = cfg.RunArchive
 	if err := h.loadFlowsFromDisk(); err != nil {
 		h.log.Warn("flow load persisted state failed", "err", err)
 		return false
+	}
+	if err := h.loadArchivedRunsFromDisk(); err != nil {
+		h.log.Warn("flow load archived runs failed", "err", err)
 	}
 	h.initActions()
 	return true
@@ -204,6 +219,9 @@ func (h *Handler) registerCapabilities() {
 	err := h.capRegistry.Register(execcap.Descriptor{
 		Provider: capabilityProviderFlow,
 		Method:   capabilityMethodRun,
+		Permissions: []string{
+			permFlowRun,
+		},
 		Tags: map[string]string{
 			"subproto": "flow",
 		},
@@ -297,10 +315,20 @@ func normalizeEventMode(mode string) string {
 }
 
 func validateTrigger(t trigger) error {
+	dedupWindowMs := 0
+	if t.DedupWindowMs != nil {
+		if *t.DedupWindowMs < 0 {
+			return errors.New("trigger dedup_window_ms must be >= 0")
+		}
+		dedupWindowMs = *t.DedupWindowMs
+	}
 	switch triggerType(t) {
 	case triggerTypeInterval:
 		if t.EveryMs == 0 {
 			return errors.New("trigger interval every_ms required")
+		}
+		if dedupWindowMs > 0 {
+			return errors.New("trigger interval does not support dedup_window_ms")
 		}
 		return nil
 	case triggerTypeEvent:
@@ -316,6 +344,13 @@ func validateTrigger(t trigger) error {
 	default:
 		return errors.New("trigger type unsupported")
 	}
+}
+
+func validateFlowRunConfig(req setReq) error {
+	if req.MaxActiveRuns != nil && *req.MaxActiveRuns < 0 {
+		return errors.New("max_active_runs must be >= 0")
+	}
+	return nil
 }
 
 func decodeEventData(data any, out any) bool {
@@ -499,6 +534,10 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 }
 
 func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req setReq, origin uint32) {
+	if err := validateFlowRunConfig(req); err != nil {
+		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
+		return
+	}
 	if err := validateGraph(req.Graph); err != nil {
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
 		return
@@ -512,6 +551,7 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 	}
 	h.mu.Lock()
 	h.flows[req.FlowID] = req
+	delete(h.triggerDedup, req.FlowID)
 	h.mu.Unlock()
 	h.restartScheduler(req.FlowID)
 	h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID})
@@ -663,6 +703,7 @@ func (h *Handler) applyDeleteLocal(ctx context.Context, reqHdr core.IHeader, req
 	}
 	h.mu.Lock()
 	delete(h.flows, flowID)
+	delete(h.triggerDedup, flowID)
 	if old := h.schedulers[flowID]; old != nil {
 		close(old.stop)
 		delete(h.schedulers, flowID)
@@ -704,36 +745,144 @@ func (h *Handler) handleRun(ctx context.Context, conn core.IConnection, hdr core
 	}
 	req.OriginNode = origin
 	req.ExecutorNode = executor
-
-	if executor != local {
-		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionRun, Data: mustJSON(req)}, func() {})
-		if code != 0 {
-			h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: code, Msg: msgText, FlowID: req.FlowID})
-		}
-		return
-	}
-
-	// 来自父节点：视为已授权/已路由到本执行者，直接执行。
-	if isParentConn(conn) {
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRun, message{Action: actionRun, Data: mustJSON(req)}, func() {
 		h.runLocal(ctx, hdr, req)
-		return
+	})
+	if code != 0 {
+		h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: code, Msg: msgText, FlowID: req.FlowID})
 	}
-
-	h.runLocal(ctx, hdr, req)
 }
 
 func (h *Handler) runLocal(ctx context.Context, hdr core.IHeader, req runReq) {
 	h.mu.Lock()
 	flow, ok := h.flows[req.FlowID]
-	h.mu.Unlock()
 	if !ok || strings.TrimSpace(flow.FlowID) == "" {
+		h.mu.Unlock()
 		h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: req.FlowID})
 		return
 	}
-
-	runID := h.enqueueRun(ctx, flow)
+	state, runCtx, allowed := h.prepareQueuedRunLocked(flow, nil, runStartSourceManual)
+	h.mu.Unlock()
+	if !allowed {
+		h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: 409, Msg: "active run limit reached", FlowID: req.FlowID})
+		return
+	}
+	runID := state.runID
+	go h.executeFlow(runCtx, flow, state)
 
 	h.sendRunResp(ctx, hdr, runResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID, RunID: runID})
+}
+
+func (h *Handler) handleCancelRun(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+	var req cancelRunReq
+	if err := json.Unmarshal(data, &req); err != nil {
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{ReqID: req.ReqID, Code: 400, Msg: "invalid cancel_run"})
+		return
+	}
+	req.ReqID = strings.TrimSpace(req.ReqID)
+	validFlowID, err := validateFlowID(req.FlowID)
+	validRunID, runErr := validateRunID(req.RunID)
+	if req.ReqID == "" {
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{ReqID: req.ReqID, Code: 400, Msg: "invalid cancel_run"})
+		return
+	}
+	if err != nil {
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	if runErr != nil {
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{ReqID: req.ReqID, Code: 400, Msg: runErr.Error(), FlowID: validFlowID})
+		return
+	}
+	req.FlowID = validFlowID
+	req.RunID = validRunID
+	srv := h.getServer(ctx)
+	if srv == nil || hdr == nil || conn == nil {
+		return
+	}
+	local := srv.NodeID()
+	executor := req.ExecutorNode
+	if executor == 0 {
+		executor = local
+	}
+	origin := req.OriginNode
+	if origin == 0 {
+		origin = hdr.SourceID()
+	}
+	req.OriginNode = origin
+	req.ExecutorNode = executor
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRun, message{Action: actionCancelRun, Data: mustJSON(req)}, func() {
+		h.cancelRunLocal(ctx, hdr, req)
+	})
+	if code != 0 {
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{
+			ReqID:        req.ReqID,
+			Code:         code,
+			Msg:          msgText,
+			ExecutorNode: executor,
+			FlowID:       req.FlowID,
+			RunID:        req.RunID,
+		})
+	}
+}
+
+func (h *Handler) cancelRunLocal(ctx context.Context, hdr core.IHeader, req cancelRunReq) {
+	h.mu.Lock()
+	state := h.runs[req.RunID]
+	h.mu.Unlock()
+	if state == nil {
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{
+			ReqID:        req.ReqID,
+			Code:         404,
+			Msg:          "not found",
+			ExecutorNode: req.ExecutorNode,
+			FlowID:       req.FlowID,
+			RunID:        req.RunID,
+		})
+		return
+	}
+
+	state.mu.Lock()
+	if strings.TrimSpace(state.flowID) != req.FlowID {
+		state.mu.Unlock()
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{
+			ReqID:        req.ReqID,
+			Code:         404,
+			Msg:          "not found",
+			ExecutorNode: req.ExecutorNode,
+			FlowID:       req.FlowID,
+			RunID:        req.RunID,
+		})
+		return
+	}
+	state.mu.Unlock()
+
+	status, ok := cancelRunState(state, runCancelMsgManual)
+	if !ok {
+		state.mu.Lock()
+		status = state.status
+		state.mu.Unlock()
+		h.sendCancelRunResp(ctx, hdr, cancelRunResp{
+			ReqID:        req.ReqID,
+			Code:         409,
+			Msg:          "run already terminal",
+			ExecutorNode: req.ExecutorNode,
+			FlowID:       req.FlowID,
+			RunID:        req.RunID,
+			Status:       status,
+		})
+		return
+	}
+
+	h.sendCancelRunResp(ctx, hdr, cancelRunResp{
+		ReqID:        req.ReqID,
+		Code:         1,
+		Msg:          runCancelMsgManual,
+		ExecutorNode: req.ExecutorNode,
+		FlowID:       req.FlowID,
+		RunID:        req.RunID,
+		Status:       status,
+	})
 }
 
 func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
@@ -769,21 +918,22 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 	}
 	req.OriginNode = origin
 	req.ExecutorNode = executor
-	if executor != local {
-		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionStatus, Data: mustJSON(req)}, func() {})
-		if code != 0 {
-			h.sendStatusResp(ctx, hdr, statusResp{
-				ReqID:        req.ReqID,
-				Code:         code,
-				Msg:          msgText,
-				ExecutorNode: executor,
-				FlowID:       req.FlowID,
-				RunID:        req.RunID,
-			})
-		}
-		return
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRead, message{Action: actionStatus, Data: mustJSON(req)}, func() {
+		h.handleStatusLocal(ctx, hdr, req)
+	})
+	if code != 0 {
+		h.sendStatusResp(ctx, hdr, statusResp{
+			ReqID:        req.ReqID,
+			Code:         code,
+			Msg:          msgText,
+			ExecutorNode: executor,
+			FlowID:       req.FlowID,
+			RunID:        req.RunID,
+		})
 	}
+}
 
+func (h *Handler) handleStatusLocal(ctx context.Context, hdr core.IHeader, req statusReq) {
 	var state *runState
 	h.mu.Lock()
 	if req.RunID != "" {
@@ -797,12 +947,17 @@ func (h *Handler) handleStatus(ctx context.Context, conn core.IConnection, hdr c
 		return
 	}
 	state.mu.Lock()
+	if strings.TrimSpace(state.flowID) != req.FlowID {
+		state.mu.Unlock()
+		h.sendStatusResp(ctx, hdr, statusResp{ReqID: req.ReqID, Code: 404, Msg: "not found", FlowID: req.FlowID, RunID: req.RunID})
+		return
+	}
 	nodes := state.snapshotNodeStatusesLocked()
 	resp := statusResp{
 		ReqID:        req.ReqID,
 		Code:         1,
 		Msg:          "ok",
-		ExecutorNode: executor,
+		ExecutorNode: req.ExecutorNode,
 		FlowID:       state.flowID,
 		RunID:        state.runID,
 		Status:       state.status,
@@ -858,22 +1013,23 @@ func (h *Handler) handleDetail(ctx context.Context, conn core.IConnection, hdr c
 	}
 	req.OriginNode = origin
 	req.ExecutorNode = executor
-	if executor != local {
-		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionDetail, Data: mustJSON(req)}, func() {})
-		if code != 0 {
-			h.sendDetailResp(ctx, hdr, detailResp{
-				ReqID:        req.ReqID,
-				Code:         code,
-				Msg:          msgText,
-				ExecutorNode: executor,
-				FlowID:       req.FlowID,
-				RunID:        req.RunID,
-				Path:         req.Path,
-			})
-		}
-		return
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRead, message{Action: actionDetail, Data: mustJSON(req)}, func() {
+		h.handleDetailLocal(ctx, hdr, req)
+	})
+	if code != 0 {
+		h.sendDetailResp(ctx, hdr, detailResp{
+			ReqID:        req.ReqID,
+			Code:         code,
+			Msg:          msgText,
+			ExecutorNode: executor,
+			FlowID:       req.FlowID,
+			RunID:        req.RunID,
+			Path:         req.Path,
+		})
 	}
+}
 
+func (h *Handler) handleDetailLocal(ctx context.Context, hdr core.IHeader, req detailReq) {
 	var state *runState
 	h.mu.Lock()
 	if req.RunID != "" {
@@ -883,14 +1039,14 @@ func (h *Handler) handleDetail(ctx context.Context, conn core.IConnection, hdr c
 	}
 	h.mu.Unlock()
 	if state == nil {
-		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: executor, FlowID: req.FlowID, RunID: req.RunID, Path: req.Path})
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: req.ExecutorNode, FlowID: req.FlowID, RunID: req.RunID, Path: req.Path})
 		return
 	}
 
 	state.mu.Lock()
 	if strings.TrimSpace(state.flowID) != req.FlowID {
 		state.mu.Unlock()
-		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: executor, FlowID: req.FlowID, RunID: req.RunID, Path: req.Path})
+		h.sendDetailResp(ctx, hdr, detailResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: req.ExecutorNode, FlowID: req.FlowID, RunID: req.RunID, Path: req.Path})
 		return
 	}
 	nodeData, ok := state.runtime.Nodes[req.NodeID]
@@ -898,10 +1054,13 @@ func (h *Handler) handleDetail(ctx context.Context, conn core.IConnection, hdr c
 		ReqID:        req.ReqID,
 		Code:         1,
 		Msg:          "ok",
-		ExecutorNode: executor,
+		ExecutorNode: req.ExecutorNode,
 		FlowID:       state.flowID,
 		RunID:        state.runID,
 		Path:         req.Path,
+	}
+	if state.status == "cancelled" && strings.TrimSpace(state.cancelReason) != "" {
+		resp.Msg = state.cancelReason
 	}
 	if ok {
 		resp.Node = &nodeStatus{
@@ -936,7 +1095,7 @@ func (h *Handler) handleDetail(ctx context.Context, conn core.IConnection, hdr c
 			ReqID:        req.ReqID,
 			Code:         500,
 			Msg:          "invalid node result json",
-			ExecutorNode: executor,
+			ExecutorNode: req.ExecutorNode,
 			FlowID:       resp.FlowID,
 			RunID:        resp.RunID,
 			Path:         req.Path,
@@ -956,7 +1115,7 @@ func (h *Handler) handleDetail(ctx context.Context, conn core.IConnection, hdr c
 			ReqID:        req.ReqID,
 			Code:         500,
 			Msg:          "detail result marshal failed",
-			ExecutorNode: executor,
+			ExecutorNode: req.ExecutorNode,
 			FlowID:       resp.FlowID,
 			RunID:        resp.RunID,
 			Path:         req.Path,
@@ -994,13 +1153,15 @@ func (h *Handler) handleList(ctx context.Context, conn core.IConnection, hdr cor
 	}
 	req.OriginNode = origin
 	req.ExecutorNode = executor
-	if executor != local {
-		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionList, Data: mustJSON(req)}, func() {})
-		if code != 0 {
-			h.sendListResp(ctx, hdr, listResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor})
-		}
-		return
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRead, message{Action: actionList, Data: mustJSON(req)}, func() {
+		h.handleListLocal(ctx, hdr, req)
+	})
+	if code != 0 {
+		h.sendListResp(ctx, hdr, listResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor})
 	}
+}
+
+func (h *Handler) handleListLocal(ctx context.Context, hdr core.IHeader, req listReq) {
 	h.mu.Lock()
 	flows := make([]flowSummary, 0, len(h.flows))
 	for _, f := range h.flows {
@@ -1025,7 +1186,81 @@ func (h *Handler) handleList(ctx context.Context, conn core.IConnection, hdr cor
 		}
 		return flows[i].FlowID < flows[j].FlowID
 	})
-	h.sendListResp(ctx, hdr, listResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: executor, Flows: flows})
+	h.sendListResp(ctx, hdr, listResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: req.ExecutorNode, Flows: flows})
+}
+
+func (h *Handler) handleListRuns(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
+	var req listRunsReq
+	if err := json.Unmarshal(data, &req); err != nil {
+		h.sendListRunsResp(ctx, hdr, listRunsResp{ReqID: req.ReqID, Code: 400, Msg: "invalid list_runs"})
+		return
+	}
+	req.ReqID = strings.TrimSpace(req.ReqID)
+	validFlowID, err := validateFlowID(req.FlowID)
+	if req.ReqID == "" {
+		h.sendListRunsResp(ctx, hdr, listRunsResp{ReqID: req.ReqID, Code: 400, Msg: "invalid list_runs"})
+		return
+	}
+	if err != nil {
+		h.sendListRunsResp(ctx, hdr, listRunsResp{ReqID: req.ReqID, Code: 400, Msg: err.Error()})
+		return
+	}
+	req.FlowID = validFlowID
+	srv := h.getServer(ctx)
+	if srv == nil || hdr == nil || conn == nil {
+		return
+	}
+	local := srv.NodeID()
+	executor := req.ExecutorNode
+	if executor == 0 {
+		executor = local
+	}
+	origin := req.OriginNode
+	if origin == 0 {
+		origin = hdr.SourceID()
+	}
+	req.OriginNode = origin
+	req.ExecutorNode = executor
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRead, message{Action: actionListRuns, Data: mustJSON(req)}, func() {
+		h.handleListRunsLocal(ctx, hdr, req)
+	})
+	if code != 0 {
+		h.sendListRunsResp(ctx, hdr, listRunsResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor, FlowID: req.FlowID})
+	}
+}
+
+func (h *Handler) handleListRunsLocal(ctx context.Context, hdr core.IHeader, req listRunsReq) {
+	h.mu.Lock()
+	ids := append([]string(nil), h.runOrderByFlow[req.FlowID]...)
+	_, flowExists := h.flows[req.FlowID]
+	h.mu.Unlock()
+	if len(ids) == 0 && !flowExists {
+		h.sendListRunsResp(ctx, hdr, listRunsResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: req.ExecutorNode, FlowID: req.FlowID})
+		return
+	}
+
+	limit := int(req.Limit)
+	runs := make([]runSummary, 0, len(ids))
+	for i := len(ids) - 1; i >= 0; i-- {
+		runID := ids[i]
+		h.mu.Lock()
+		state := h.runs[runID]
+		h.mu.Unlock()
+		if state == nil {
+			continue
+		}
+		state.mu.Lock()
+		if strings.TrimSpace(state.flowID) != req.FlowID {
+			state.mu.Unlock()
+			continue
+		}
+		runs = append(runs, state.snapshotRunSummaryLocked())
+		state.mu.Unlock()
+		if limit > 0 && len(runs) >= limit {
+			break
+		}
+	}
+	h.sendListRunsResp(ctx, hdr, listRunsResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: req.ExecutorNode, FlowID: req.FlowID, Runs: runs})
 }
 
 func (h *Handler) handleGet(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
@@ -1060,24 +1295,36 @@ func (h *Handler) handleGet(ctx context.Context, conn core.IConnection, hdr core
 	}
 	req.OriginNode = origin
 	req.ExecutorNode = executor
-	if executor != local {
-		_, code, msgText := h.forwardToExecutorNoPerm(ctx, srv, conn, hdr, executor, origin, message{Action: actionGet, Data: mustJSON(req)}, func() {})
-		if code != 0 {
-			h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor, FlowID: req.FlowID})
-		}
-		return
+	_, code, msgText := h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, permFlowRead, message{Action: actionGet, Data: mustJSON(req)}, func() {
+		h.handleGetLocal(ctx, hdr, req)
+	})
+	if code != 0 {
+		h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: code, Msg: msgText, ExecutorNode: executor, FlowID: req.FlowID})
 	}
+}
+
+func (h *Handler) handleGetLocal(ctx context.Context, hdr core.IHeader, req getReq) {
 	h.mu.Lock()
 	f, ok := h.flows[req.FlowID]
 	h.mu.Unlock()
 	if !ok || strings.TrimSpace(f.FlowID) == "" {
-		h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: executor, FlowID: req.FlowID})
+		h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: 404, Msg: "not found", ExecutorNode: req.ExecutorNode, FlowID: req.FlowID})
 		return
 	}
-	h.sendGetResp(ctx, hdr, getResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ExecutorNode: executor, FlowID: f.FlowID, Name: f.Name, Trigger: f.Trigger, Graph: f.Graph})
+	h.sendGetResp(ctx, hdr, getResp{
+		ReqID:         req.ReqID,
+		Code:          1,
+		Msg:           "ok",
+		ExecutorNode:  req.ExecutorNode,
+		FlowID:        f.FlowID,
+		Name:          f.Name,
+		MaxActiveRuns: f.MaxActiveRuns,
+		Trigger:       f.Trigger,
+		Graph:         f.Graph,
+	})
 }
 
-func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer, conn core.IConnection, hdr core.IHeader, executor, origin uint32, msg message, localFn func()) (bool, int, string) {
+func (h *Handler) forwardToExecutorWithPerm(ctx context.Context, srv core.IServer, conn core.IConnection, hdr core.IHeader, executor, origin uint32, perm string, msg message, localFn func()) (bool, int, string) {
 	if srv == nil || conn == nil || hdr == nil || executor == 0 {
 		return false, 500, "invalid route"
 	}
@@ -1109,6 +1356,9 @@ func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer,
 		return true, 0, ""
 	}
 	if executor == local {
+		if strings.TrimSpace(perm) != "" && !h.hasPermission(origin, perm) {
+			return false, 403, "permission denied"
+		}
 		if localFn != nil {
 			localFn()
 		}
@@ -1154,6 +1404,9 @@ func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer,
 		}
 		return true, 0, ""
 	}
+	if strings.TrimSpace(perm) != "" && !h.hasPermission(origin, perm) {
+		return false, 403, "permission denied"
+	}
 	downHdr, ok := header.CloneToTCPForForward(hdr)
 	if !ok {
 		h.log.Warn("drop flow frame due to hop_limit", "target", executor, "source", hdr.SourceID())
@@ -1165,6 +1418,10 @@ func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer,
 		return false, 500, "forward failed"
 	}
 	return true, 0, ""
+}
+
+func (h *Handler) forwardToExecutorNoPerm(ctx context.Context, srv core.IServer, conn core.IConnection, hdr core.IHeader, executor, origin uint32, msg message, localFn func()) (bool, int, string) {
+	return h.forwardToExecutorWithPerm(ctx, srv, conn, hdr, executor, origin, "", msg, localFn)
 }
 
 func (h *Handler) sendListResp(ctx context.Context, hdr core.IHeader, resp listResp) {
@@ -1219,15 +1476,16 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer h.pruneRuns(flow.FlowID)
+	defer h.finalizeRun(flow.FlowID, state)
 	order, err := topoOrder(flow.Graph)
 	state.mu.Lock()
 	if ctx.Err() != nil {
 		state.status = "cancelled"
 		state.end = time.Now()
 		if state.cancelReason == "" {
-			state.cancelReason = runCancelMsgFlowDeleted
+			state.cancelReason = runCancelMsgCancelled
 		}
+		state.markActiveNodesCancelledLocked(state.cancelReason)
 		state.mu.Unlock()
 		return
 	}
@@ -1242,7 +1500,7 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 
 	for _, n := range order {
 		if ctx.Err() != nil {
-			markRunCancelled(state, runCancelMsgFlowDeleted)
+			markRunCancelled(state, runCancelMsgCancelled)
 			return
 		}
 		if n == nil {
@@ -1261,6 +1519,13 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 		}
 		if retry < 0 {
 			retry = 0
+		}
+		retryBackoffMs := 0
+		if n.RetryBackoffMs != nil {
+			retryBackoffMs = *n.RetryBackoffMs
+		}
+		if retryBackoffMs < 0 {
+			retryBackoffMs = 0
 		}
 		timeoutMs := 3000
 		if n.TimeoutMs != nil {
@@ -1283,9 +1548,14 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			if ctx.Err() != nil {
 				break
 			}
+			if attempt < retry && retryBackoffMs > 0 {
+				if !waitRetryBackoff(ctx, time.Duration(retryBackoffMs)*time.Millisecond) {
+					break
+				}
+			}
 		}
 		if ctx.Err() != nil {
-			markRunCancelled(state, runCancelMsgFlowDeleted)
+			markRunCancelled(state, runCancelMsgCancelled)
 			return
 		}
 		rt := nodeRuntimeData{}
@@ -1310,8 +1580,9 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 				state.end = time.Now()
 			}
 			if state.cancelReason == "" {
-				state.cancelReason = runCancelMsgFlowDeleted
+				state.cancelReason = runCancelMsgCancelled
 			}
+			state.markActiveNodesCancelledLocked(state.cancelReason)
 			state.mu.Unlock()
 			return
 		}
@@ -1327,7 +1598,7 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 		}
 	}
 	if ctx.Err() != nil {
-		markRunCancelled(state, runCancelMsgFlowDeleted)
+		markRunCancelled(state, runCancelMsgCancelled)
 		return
 	}
 	state.mu.Lock()
@@ -1336,14 +1607,29 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 			state.end = time.Now()
 		}
 		if state.cancelReason == "" {
-			state.cancelReason = runCancelMsgFlowDeleted
+			state.cancelReason = runCancelMsgCancelled
 		}
+		state.markActiveNodesCancelledLocked(state.cancelReason)
 		state.mu.Unlock()
 		return
 	}
 	state.status = "succeeded"
 	state.end = time.Now()
 	state.mu.Unlock()
+}
+
+func waitRetryBackoff(ctx context.Context, backoff time.Duration) bool {
+	if backoff <= 0 {
+		return true
+	}
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 type callSpec struct {
@@ -1615,6 +1901,17 @@ func (h *Handler) sendRunResp(ctx context.Context, hdr core.IHeader, resp runRes
 	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionRunResp, Data: mustJSON(resp)})
 }
 
+func (h *Handler) sendCancelRunResp(ctx context.Context, hdr core.IHeader, resp cancelRunResp) {
+	target := uint32(0)
+	if hdr != nil {
+		target = hdr.SourceID()
+	}
+	if target == 0 {
+		return
+	}
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionCancelRunResp, Data: mustJSON(resp)})
+}
+
 func (h *Handler) sendStatusResp(ctx context.Context, hdr core.IHeader, resp statusResp) {
 	target := uint32(0)
 	if hdr != nil {
@@ -1635,6 +1932,17 @@ func (h *Handler) sendDetailResp(ctx context.Context, hdr core.IHeader, resp det
 		return
 	}
 	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionDetailResp, Data: mustJSON(resp)})
+}
+
+func (h *Handler) sendListRunsResp(ctx context.Context, hdr core.IHeader, resp listRunsResp) {
+	target := uint32(0)
+	if hdr != nil {
+		target = hdr.SourceID()
+	}
+	if target == 0 {
+		return
+	}
+	h.sendCtrlToNodeWithReqHdr(ctx, hdr, target, message{Action: actionListRunsResp, Data: mustJSON(resp)})
 }
 
 func (h *Handler) sendCtrlToNode(ctx context.Context, target uint32, msg message) {
@@ -1862,8 +2170,9 @@ func (h *Handler) latestRunStateLocked(flowID string) *runState {
 	return nil
 }
 
-func (h *Handler) hasActiveRunLocked(flowID string) bool {
+func (h *Handler) activeRunCountLocked(flowID string) int {
 	ids := h.runOrderByFlow[flowID]
+	active := 0
 	for i := len(ids) - 1; i >= 0; i-- {
 		st := h.runs[ids[i]]
 		if st == nil {
@@ -1873,28 +2182,34 @@ func (h *Handler) hasActiveRunLocked(flowID string) bool {
 		status := st.status
 		st.mu.Unlock()
 		if status == "queued" || status == "running" {
-			return true
+			active++
 		}
 	}
-	return false
+	return active
+}
+
+func (h *Handler) hasActiveRunLocked(flowID string) bool {
+	return h.activeRunCountLocked(flowID) > 0
 }
 
 func (h *Handler) pruneRuns(flowID string) {
 	h.mu.Lock()
-	h.pruneRunsLocked(flowID)
+	toDelete := h.pruneRunsLocked(flowID)
 	h.mu.Unlock()
+	h.removeArchivedRuns(toDelete)
 }
 
-func (h *Handler) pruneRunsLocked(flowID string) {
+func (h *Handler) pruneRunsLocked(flowID string) []archivedRunRef {
 	ids := h.runOrderByFlow[flowID]
 	if len(ids) == 0 {
 		delete(h.runOrderByFlow, flowID)
-		return
+		return nil
 	}
 
 	limit := h.retainedRunLimit()
 	terminalKept := 0
 	kept := make([]string, 0, len(ids))
+	pruned := make([]archivedRunRef, 0)
 
 	for i := len(ids) - 1; i >= 0; i-- {
 		runID := ids[i]
@@ -1916,16 +2231,18 @@ func (h *Handler) pruneRunsLocked(flowID string) {
 			continue
 		}
 		delete(h.runs, runID)
+		pruned = append(pruned, archivedRunRef{flowID: flowID, runID: runID})
 	}
 
 	if len(kept) == 0 {
 		delete(h.runOrderByFlow, flowID)
-		return
+		return pruned
 	}
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
 	h.runOrderByFlow[flowID] = kept
+	return pruned
 }
 
 func validateGraph(g graph) error {
@@ -1959,6 +2276,9 @@ func validateGraph(g graph) error {
 }
 
 func validateSetNodeKindAndSpec(nodeID string, n node, idx *graphIndex) error {
+	if n.RetryBackoffMs != nil && *n.RetryBackoffMs < 0 {
+		return fmt.Errorf("node %s retry_backoff_ms must be >= 0", nodeID)
+	}
 	kind := strings.ToLower(strings.TrimSpace(n.Kind))
 	switch kind {
 	case "call":
@@ -2050,6 +2370,9 @@ func (h *Handler) loadFlowsFromDisk() error {
 		req.FlowID = validFlowID
 		normalizeTrigger(&req.Trigger)
 		if validateTrigger(req.Trigger) != nil {
+			continue
+		}
+		if validateFlowRunConfig(req) != nil {
 			continue
 		}
 		loaded[req.FlowID] = req
@@ -2232,43 +2555,75 @@ func (h *Handler) tryStartScheduledRun(flowID string) {
 }
 
 func (h *Handler) cancelRunsLocked(flowID, reason string) {
-	now := time.Now()
 	for _, runID := range h.runOrderByFlow[flowID] {
 		st := h.runs[runID]
 		if st == nil {
 			continue
 		}
-		if st.cancel != nil {
-			st.cancel()
-		}
-		st.mu.Lock()
-		switch st.status {
-		case "queued", "running":
-			st.status = "cancelled"
-			st.end = now
-			if reason != "" {
-				st.cancelReason = reason
-			}
-		}
-		st.mu.Unlock()
+		cancelRunState(st, reason)
 	}
 }
 
 func markRunCancelled(state *runState, reason string) {
-	if state == nil {
-		return
+	cancelRunState(state, reason)
+}
+
+func (state *runState) markActiveNodesCancelledLocked(reason string) {
+	for nodeID, nodeData := range state.runtime.Nodes {
+		switch nodeData.Status {
+		case "queued", "running":
+			nodeData.Status = "cancelled"
+			if reason != "" && strings.TrimSpace(nodeData.Msg) == "" {
+				nodeData.Msg = reason
+			}
+			state.runtime.Nodes[nodeID] = nodeData
+		}
 	}
+}
+
+func cancelRunState(state *runState, reason string) (string, bool) {
+	if state == nil {
+		return "", false
+	}
+	var cancel context.CancelFunc
 	state.mu.Lock()
-	if state.status == "succeeded" || state.status == "failed" {
+	status := state.status
+	if isTerminalRunStatus(status) {
 		state.mu.Unlock()
-		return
+		return status, false
 	}
 	state.status = "cancelled"
-	state.end = time.Now()
-	if reason != "" {
+	if state.end.IsZero() {
+		state.end = time.Now()
+	}
+	if reason != "" && strings.TrimSpace(state.cancelReason) == "" {
 		state.cancelReason = reason
 	}
+	state.markActiveNodesCancelledLocked(state.cancelReason)
+	cancel = state.cancel
+	status = state.status
 	state.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return status, true
+}
+
+func (state *runState) snapshotRunSummaryLocked() runSummary {
+	sum := runSummary{
+		RunID:  state.runID,
+		Status: state.status,
+	}
+	if !state.start.IsZero() {
+		sum.StartedAtMs = state.start.UTC().UnixMilli()
+	}
+	if !state.end.IsZero() {
+		sum.EndedAtMs = state.end.UTC().UnixMilli()
+	}
+	if strings.TrimSpace(state.cancelReason) != "" {
+		sum.Msg = strings.TrimSpace(state.cancelReason)
+	}
+	return sum
 }
 
 func (h *Handler) enqueueRun(ctx context.Context, flow setReq) string {
@@ -2280,24 +2635,12 @@ func (h *Handler) enqueueRunWithTrigger(ctx context.Context, flow setReq, trigge
 		ctx = h.backgroundRunContext()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	runID := newUUID()
-	executorNode := uint32(0)
-	if srv := h.getServer(ctx); srv != nil {
-		executorNode = srv.NodeID()
-	}
-	state := &runState{
-		flowID:  flow.FlowID,
-		runID:   runID,
-		status:  "queued",
-		start:   time.Now(),
-		cancel:  cancel,
-		runtime: newRunContext(flow.FlowID, runID, executorNode, triggerCtx),
-	}
 	h.mu.Lock()
+	state := h.newQueuedRunStateLocked(flow, triggerCtx, cancel, time.Now())
 	h.recordRunLocked(state)
 	h.mu.Unlock()
 	go h.executeFlow(runCtx, flow, state)
-	return runID
+	return state.runID
 }
 
 func (h *Handler) tryStartRun(flowID string) {
@@ -2315,28 +2658,98 @@ func (h *Handler) tryStartRunWithTrigger(flowID string, triggerCtx json.RawMessa
 		h.mu.Unlock()
 		return
 	}
-	if h.hasActiveRunLocked(flowID) {
-		h.mu.Unlock()
+	state, runCtx, allowed := h.prepareQueuedRunLocked(flow, triggerCtx, runStartSourceTrigger)
+	h.mu.Unlock()
+	if !allowed {
 		return
 	}
-	runID := newUUID()
-	srv := h.srv
-	runCtx, cancel := context.WithCancel(backgroundRunContextForServer(srv))
-	executorNode := uint32(0)
-	if srv != nil {
-		executorNode = srv.NodeID()
+	go h.executeFlow(runCtx, flow, state)
+}
+
+func effectiveMaxActiveRuns(flow setReq, source runStartSource) int {
+	if flow.MaxActiveRuns != nil {
+		if *flow.MaxActiveRuns < 0 {
+			return 0
+		}
+		return *flow.MaxActiveRuns
 	}
-	state := &runState{
+	if source == runStartSourceTrigger {
+		return 1
+	}
+	return 0
+}
+
+func triggerDedupWindow(t trigger) time.Duration {
+	if t.DedupWindowMs == nil || *t.DedupWindowMs <= 0 {
+		return 0
+	}
+	return time.Duration(*t.DedupWindowMs) * time.Millisecond
+}
+
+func triggerDedupKey(triggerCtx json.RawMessage) string {
+	raw := bytes.TrimSpace(triggerCtx)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	return string(raw)
+}
+
+func (h *Handler) checkAndRecordTriggerDedupLocked(flow setReq, triggerCtx json.RawMessage, now time.Time) bool {
+	window := triggerDedupWindow(flow.Trigger)
+	if window <= 0 {
+		return false
+	}
+	key := triggerDedupKey(triggerCtx)
+	if key == "" {
+		return false
+	}
+	cutoff := now.Add(-window)
+	bucket := h.triggerDedup[flow.FlowID]
+	if bucket == nil {
+		bucket = make(map[string]time.Time)
+		h.triggerDedup[flow.FlowID] = bucket
+	}
+	for existingKey, seenAt := range bucket {
+		if !seenAt.After(cutoff) {
+			delete(bucket, existingKey)
+		}
+	}
+	if seenAt, ok := bucket[key]; ok && now.Sub(seenAt) < window {
+		return true
+	}
+	bucket[key] = now
+	return false
+}
+
+func (h *Handler) prepareQueuedRunLocked(flow setReq, triggerCtx json.RawMessage, source runStartSource) (*runState, context.Context, bool) {
+	limit := effectiveMaxActiveRuns(flow, source)
+	if limit > 0 && h.activeRunCountLocked(flow.FlowID) >= limit {
+		return nil, nil, false
+	}
+	now := time.Now()
+	if source == runStartSourceTrigger && h.checkAndRecordTriggerDedupLocked(flow, triggerCtx, now) {
+		return nil, nil, false
+	}
+	runCtx, cancel := context.WithCancel(backgroundRunContextForServer(h.srv))
+	state := h.newQueuedRunStateLocked(flow, triggerCtx, cancel, now)
+	h.recordRunLocked(state)
+	return state, runCtx, true
+}
+
+func (h *Handler) newQueuedRunStateLocked(flow setReq, triggerCtx json.RawMessage, cancel context.CancelFunc, start time.Time) *runState {
+	runID := newUUID()
+	executorNode := uint32(0)
+	if h.srv != nil {
+		executorNode = h.srv.NodeID()
+	}
+	return &runState{
 		flowID:  flow.FlowID,
 		runID:   runID,
 		status:  "queued",
-		start:   time.Now(),
+		start:   start,
 		cancel:  cancel,
 		runtime: newRunContext(flow.FlowID, runID, executorNode, triggerCtx),
 	}
-	h.recordRunLocked(state)
-	h.mu.Unlock()
-	go h.executeFlow(runCtx, flow, state)
 }
 
 func newUUID() string {

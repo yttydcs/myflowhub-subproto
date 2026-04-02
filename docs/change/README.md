@@ -24,6 +24,20 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-04-02_flow-run-archive-runtime.md](2026-04-02_flow-run-archive-runtime.md)
+  - run archive 首版：为 retained window 内的终态 run 增加 local JSON archive，支持重启后继续查询 recent run。
+  - [2026-04-02_flow-trigger-dedup-runtime.md](2026-04-02_flow-trigger-dedup-runtime.md)
+  - trigger dedup 首版：新增 `dedup_window_ms` 窗口去重，抑制 `event/var_changed` 的短窗口重复启动。
+  - [2026-04-02_flow-active-run-limit-runtime.md](2026-04-02_flow-active-run-limit-runtime.md)
+  - `max_active_runs` 首版运行时：为手动/trigger 启动补齐统一 active-run gate，并保留 legacy 默认兼容语义。
+  - [2026-04-02_flow-retry-backoff-runtime.md](2026-04-02_flow-retry-backoff-runtime.md)
+  - retry backoff 首版：新增 `retry_backoff_ms` 固定间隔策略，并让 backoff 等待期间响应取消。
+  - [2026-04-02_flow-permission-refinement-runtime.md](2026-04-02_flow-permission-refinement-runtime.md)
+  - `flow.run` / `flow.read` 权限细化：统一 run/read 权限 gate，并让 `flow::run` capability 描述与运行时判权保持一致。
+  - [2026-04-02_flow-list-runs-runtime.md](2026-04-02_flow-list-runs-runtime.md)
+  - `list_runs` 首版运行时：提供 retained run history 查询，按最新到最旧返回 run 摘要。
+  - [2026-04-02_flow-cancel-run-runtime.md](2026-04-02_flow-cancel-run-runtime.md)
+  - `cancel_run` 首版运行时：新增显式 run 取消动作，并让 `status/detail` 同步体现取消结果。
   - [2026-04-02_flow-delete-permission-baseline.md](2026-04-02_flow-delete-permission-baseline.md)
   - delete 基线修复：对齐 `flow.delete` 测试授权前置，恢复 delete 相关基线回归。
   - [2026-04-02_flow-local-vars-detail-mainline.md](2026-04-02_flow-local-vars-detail-mainline.md)

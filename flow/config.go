@@ -10,6 +10,7 @@ import (
 const (
 	cfgBaseDir         = "flow.base_dir"
 	cfgMaxRetainedRuns = "flow.max_retained_runs"
+	cfgRunArchive      = "flow.run_archive_enabled"
 
 	defaultMaxRetainedRuns = 32
 )
@@ -17,6 +18,7 @@ const (
 type handlerConfig struct {
 	BaseDir         string
 	MaxRetainedRuns int
+	RunArchive      bool
 }
 
 func loadConfig(cfg core.IConfig) handlerConfig {
@@ -42,6 +44,12 @@ func loadConfig(cfg core.IConfig) handlerConfig {
 	}
 	if out.MaxRetainedRuns <= 0 {
 		out.MaxRetainedRuns = defaultMaxRetainedRuns
+	}
+	if raw, ok := cfg.Get(cfgRunArchive); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "1", "true", "yes", "on":
+			out.RunArchive = true
+		}
 	}
 	return out
 }

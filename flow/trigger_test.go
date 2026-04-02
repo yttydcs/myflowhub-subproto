@@ -31,6 +31,11 @@ func TestValidateTrigger(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "interval dedup unsupported",
+			input:   trigger{Type: "interval", EveryMs: 1000, DedupWindowMs: intPtr(100)},
+			wantErr: true,
+		},
+		{
 			name:    "event requires name or topic",
 			input:   trigger{Type: "event"},
 			wantErr: true,
@@ -51,6 +56,11 @@ func TestValidateTrigger(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "event with dedup window",
+			input:   trigger{Type: "event", EventTopic: "sensor/temp", DedupWindowMs: intPtr(100)},
+			wantErr: false,
+		},
+		{
 			name:    "event mode unsupported",
 			input:   trigger{Type: "event", EventMode: "invalid", EventTopic: "sensor/temp"},
 			wantErr: true,
@@ -59,6 +69,11 @@ func TestValidateTrigger(t *testing.T) {
 			name:    "var_changed no filter",
 			input:   trigger{Type: "var_changed"},
 			wantErr: false,
+		},
+		{
+			name:    "negative dedup window",
+			input:   trigger{Type: "var_changed", DedupWindowMs: intPtr(-1)},
+			wantErr: true,
 		},
 		{
 			name:    "unsupported",
@@ -169,6 +184,176 @@ func TestTryStartScheduledRun_PopulatesIntervalTriggerContext(t *testing.T) {
 	}
 }
 
+func TestTryStartRunWithTrigger_DefaultLegacySingleFlight(t *testing.T) {
+	h, _, _, _, _ := newDeleteTestEnv(t, nil)
+	release := make(chan struct{})
+	method := "test::trigger-legacy-single-flight"
+	h.RegisterLocalMethod(method, func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		<-release
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+
+	flowID := "123e4567-e89b-12d3-a456-426614174126"
+	flow := makeTestFlow(flowID, trigger{Type: "interval", EveryMs: 1000})
+	flow.Graph = simpleGraph(method)
+	h.flows[flowID] = flow
+
+	h.tryStartRunWithTrigger(flowID, buildIntervalTriggerContext(time.Now()))
+	waitRunCount(t, h, 1)
+	h.tryStartRunWithTrigger(flowID, buildIntervalTriggerContext(time.Now()))
+
+	time.Sleep(50 * time.Millisecond)
+
+	h.mu.Lock()
+	gotRuns := len(h.runOrderByFlow[flowID])
+	h.mu.Unlock()
+	if gotRuns != 1 {
+		t.Fatalf("expected legacy trigger single-flight, got runs=%d", gotRuns)
+	}
+
+	close(release)
+	waitLatestRunStatus(t, h, flowID, "succeeded")
+}
+
+func TestTryStartRunWithTrigger_MaxActiveRunsZeroAllowsOverlap(t *testing.T) {
+	h, _, _, _, _ := newDeleteTestEnv(t, nil)
+	release := make(chan struct{})
+	method := "test::trigger-unlimited-overlap"
+	h.RegisterLocalMethod(method, func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		<-release
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+
+	zero := 0
+	flowID := "123e4567-e89b-12d3-a456-426614174127"
+	flow := makeTestFlow(flowID, trigger{Type: "interval", EveryMs: 1000})
+	flow.MaxActiveRuns = &zero
+	flow.Graph = simpleGraph(method)
+	h.flows[flowID] = flow
+
+	h.tryStartRunWithTrigger(flowID, buildIntervalTriggerContext(time.Now()))
+	waitRunCount(t, h, 1)
+	h.tryStartRunWithTrigger(flowID, buildIntervalTriggerContext(time.Now()))
+	waitRunCount(t, h, 2)
+
+	h.mu.Lock()
+	gotRuns := len(h.runOrderByFlow[flowID])
+	h.mu.Unlock()
+	if gotRuns != 2 {
+		t.Fatalf("expected overlapping trigger runs when max_active_runs=0, got runs=%d", gotRuns)
+	}
+
+	close(release)
+	waitLatestRunStatus(t, h, flowID, "succeeded")
+}
+
+func TestHandleTopicPublishEvent_DedupWindowSkipsDuplicateStarts(t *testing.T) {
+	h := NewHandler(nil)
+	dedupWindowMs := 80
+	method := "test::event-dedup"
+	h.RegisterLocalMethod(method, func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	flowID := "event-dedup"
+	flow := makeTestFlow(flowID, trigger{
+		Type:          "event",
+		EventTopic:    "sensor/temp",
+		DedupWindowMs: &dedupWindowMs,
+	})
+	flow.Graph = simpleGraph(method)
+	h.flows[flowID] = flow
+
+	ev := topicPublishEvent{
+		Topic: "sensor/temp",
+		Name:  "alarm",
+		Data:  mustJSON(map[string]any{"value": 1}),
+	}
+	h.handleTopicPublishEvent(eventModePublish, ev)
+	waitRunCount(t, h, 1)
+	waitRunTerminal(t, h, latestRunStateForTest(t, h, flowID).runID)
+
+	h.handleTopicPublishEvent(eventModePublish, ev)
+	time.Sleep(20 * time.Millisecond)
+
+	h.mu.Lock()
+	gotRuns := len(h.runOrderByFlow[flowID])
+	h.mu.Unlock()
+	if gotRuns != 1 {
+		t.Fatalf("expected duplicate event to be deduped, got runs=%d", gotRuns)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	h.handleTopicPublishEvent(eventModePublish, ev)
+	waitRunCount(t, h, 2)
+}
+
+func TestHandleTopicPublishEvent_DedupWindowAllowsDifferentPayload(t *testing.T) {
+	h := NewHandler(nil)
+	dedupWindowMs := 200
+	method := "test::event-dedup-payload"
+	h.RegisterLocalMethod(method, func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	flowID := "event-dedup-payload"
+	flow := makeTestFlow(flowID, trigger{
+		Type:          "event",
+		EventTopic:    "sensor/temp",
+		DedupWindowMs: &dedupWindowMs,
+	})
+	flow.Graph = simpleGraph(method)
+	h.flows[flowID] = flow
+
+	h.handleTopicPublishEvent(eventModePublish, topicPublishEvent{
+		Topic: "sensor/temp",
+		Name:  "alarm",
+		Data:  mustJSON(map[string]any{"value": 1}),
+	})
+	waitRunCount(t, h, 1)
+	waitRunTerminal(t, h, latestRunStateForTest(t, h, flowID).runID)
+
+	h.handleTopicPublishEvent(eventModePublish, topicPublishEvent{
+		Topic: "sensor/temp",
+		Name:  "alarm",
+		Data:  mustJSON(map[string]any{"value": 2}),
+	})
+	waitRunCount(t, h, 2)
+}
+
+func TestHandleVarChangedEvent_DedupWindowKeysByOwnerNameOp(t *testing.T) {
+	h := NewHandler(nil)
+	dedupWindowMs := 200
+	method := "test::var-dedup"
+	h.RegisterLocalMethod(method, func(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"ok":true}`), nil
+	})
+	flowID := "var-dedup"
+	flow := makeTestFlow(flowID, trigger{
+		Type:          "var_changed",
+		VarOwner:      2,
+		VarName:       "k1",
+		DedupWindowMs: &dedupWindowMs,
+	})
+	flow.Graph = simpleGraph(method)
+	h.flows[flowID] = flow
+
+	h.handleVarChangedEvent(varChangeOpChanged, varChangedEvent{Owner: 2, Name: "k1"})
+	waitRunCount(t, h, 1)
+	waitRunTerminal(t, h, latestRunStateForTest(t, h, flowID).runID)
+
+	h.handleVarChangedEvent(varChangeOpChanged, varChangedEvent{Owner: 2, Name: "k1"})
+	time.Sleep(20 * time.Millisecond)
+
+	h.mu.Lock()
+	gotRuns := len(h.runOrderByFlow[flowID])
+	h.mu.Unlock()
+	if gotRuns != 1 {
+		t.Fatalf("expected duplicate var_changed trigger to be deduped, got runs=%d", gotRuns)
+	}
+
+	h.handleVarChangedEvent(varChangeOpDeleted, varChangedEvent{Owner: 2, Name: "k1"})
+	waitRunCount(t, h, 2)
+}
+
 func TestTriggerStartedRunPreservesServerContextForLocalCapability(t *testing.T) {
 	cfg := coreconfig.NewMap(map[string]string{})
 	reg := execcap.SharedRegistry(cfg)
@@ -238,6 +423,10 @@ func makeTestFlow(flowID string, tr trigger) setReq {
 			Edges: nil,
 		},
 	}
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func waitRunCount(t *testing.T, h *Handler, want int) {
