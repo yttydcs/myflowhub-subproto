@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,8 +93,10 @@ type runStartSource string
 
 const (
 	triggerTypeInterval   = "interval"
+	triggerTypeCron       = "cron"
 	triggerTypeEvent      = "event"
 	triggerTypeVarChanged = "var_changed"
+	triggerTypeSubflow    = "subflow"
 
 	eventModePublish  = "publish"
 	eventModeReceived = "received"
@@ -312,6 +315,7 @@ func normalizeTrigger(t *trigger) {
 		return
 	}
 	t.Type = triggerType(*t)
+	t.Cron = strings.TrimSpace(t.Cron)
 	t.EventMode = strings.ToLower(strings.TrimSpace(t.EventMode))
 	if t.Type == triggerTypeEvent && t.EventMode == "" {
 		t.EventMode = eventModePublish
@@ -349,6 +353,17 @@ func validateTrigger(t trigger) error {
 		}
 		if dedupWindowMs > 0 {
 			return errors.New("trigger interval does not support dedup_window_ms")
+		}
+		return nil
+	case triggerTypeCron:
+		if strings.TrimSpace(t.Cron) == "" {
+			return errors.New("trigger cron required")
+		}
+		if _, err := parseCronExpr(t.Cron); err != nil {
+			return fmt.Errorf("trigger cron invalid: %w", err)
+		}
+		if dedupWindowMs > 0 {
+			return errors.New("trigger cron does not support dedup_window_ms")
 		}
 		return nil
 	case triggerTypeEvent:
@@ -558,7 +573,7 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
 		return
 	}
-	if err := validateGraph(req.Graph); err != nil {
+	if err := validateGraphForFlow(req.FlowID, req.Graph); err != nil {
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
 		return
 	}
@@ -1492,12 +1507,86 @@ func backgroundRunContextForServer(srv core.IServer) context.Context {
 	return ctx
 }
 
+type flowStackContextKey struct{}
+
+func pushFlowExecutionContext(ctx context.Context, flowID string) context.Context {
+	flowID = strings.TrimSpace(flowID)
+	if flowID == "" {
+		return ctx
+	}
+	stack := make(map[string]struct{})
+	if existing, ok := ctx.Value(flowStackContextKey{}).(map[string]struct{}); ok {
+		for id := range existing {
+			stack[id] = struct{}{}
+		}
+	}
+	stack[flowID] = struct{}{}
+	return context.WithValue(ctx, flowStackContextKey{}, stack)
+}
+
+func flowExecutionContains(ctx context.Context, flowID string) bool {
+	flowID = strings.TrimSpace(flowID)
+	if flowID == "" || ctx == nil {
+		return false
+	}
+	stack, ok := ctx.Value(flowStackContextKey{}).(map[string]struct{})
+	if !ok {
+		return false
+	}
+	_, exists := stack[flowID]
+	return exists
+}
+
+func newNestedRunState(flowID, runID string, executorNode uint32, triggerCtx json.RawMessage) *runState {
+	return &runState{
+		flowID:  strings.TrimSpace(flowID),
+		runID:   strings.TrimSpace(runID),
+		status:  "queued",
+		start:   time.Now(),
+		runtime: newRunContext(flowID, runID, executorNode, triggerCtx),
+	}
+}
+
+func newLoopRunState(parent *runState, item any, index int) *runState {
+	if parent == nil {
+		return newNestedRunState("", "", 0, nil)
+	}
+	parent.mu.Lock()
+	flowID := parent.runtime.FlowID
+	runID := parent.runtime.RunID
+	executorNode := parent.runtime.ExecutorNode
+	triggerCtx := cloneRawJSON(parent.runtime.Trigger)
+	parent.mu.Unlock()
+	child := newNestedRunState(flowID, runID, executorNode, triggerCtx)
+	child.runtime.Loop = &loopRuntimeData{
+		Item:  mustJSON(item),
+		Index: index,
+	}
+	return child
+}
+
+func newSubflowRunState(parent *runState, flowID string, triggerCtx json.RawMessage) *runState {
+	executorNode := uint32(0)
+	if parent != nil {
+		parent.mu.Lock()
+		executorNode = parent.runtime.ExecutorNode
+		parent.mu.Unlock()
+	}
+	return newNestedRunState(flowID, newUUID(), executorNode, triggerCtx)
+}
+
 func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = pushFlowExecutionContext(ctx, flow.FlowID)
 	defer h.finalizeRun(flow.FlowID, state)
-	order, err := topoOrder(flow.Graph)
+	h.executeGraph(ctx, flow, flow.Graph, state)
+}
+
+func (h *Handler) executeGraph(ctx context.Context, flow setReq, g graph, state *runState) {
+	order, err := topoOrder(g)
+	idx, idxErr := buildGraphIndex(g)
 	state.mu.Lock()
 	if ctx.Err() != nil {
 		state.status = "cancelled"
@@ -1509,7 +1598,7 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 		state.mu.Unlock()
 		return
 	}
-	if err != nil {
+	if err != nil || idxErr != nil {
 		state.status = "failed"
 		state.end = time.Now()
 		state.mu.Unlock()
@@ -1528,6 +1617,25 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 		}
 		id := strings.TrimSpace(n.ID)
 		if id == "" {
+			continue
+		}
+		active, activeErr := shouldExecuteNode(idx, id, state)
+		if activeErr != nil {
+			state.mu.Lock()
+			state.setNodeRuntimeLocked(id, nodeRuntimeData{
+				Status: "failed",
+				Code:   400,
+				Msg:    activeErr.Error(),
+			})
+			state.status = "failed"
+			state.end = time.Now()
+			state.mu.Unlock()
+			return
+		}
+		if !active {
+			state.mu.Lock()
+			state.setNodeRuntimeLocked(id, nodeRuntimeData{Status: "skipped"})
+			state.mu.Unlock()
 			continue
 		}
 		state.mu.Lock()
@@ -1638,6 +1746,50 @@ func (h *Handler) executeFlow(ctx context.Context, flow setReq, state *runState)
 	state.mu.Unlock()
 }
 
+func shouldExecuteNode(idx *graphIndex, nodeID string, state *runState) (bool, error) {
+	if idx == nil {
+		return true, nil
+	}
+	incoming := idx.incomingEdges(nodeID)
+	if len(incoming) == 0 {
+		return true, nil
+	}
+	activeCount := 0
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	for _, e := range incoming {
+		parentID := strings.TrimSpace(e.From)
+		parentNode, ok := idx.node(parentID)
+		if !ok {
+			return false, fmt.Errorf("node %s parent %s missing", nodeID, parentID)
+		}
+		parentData, ok := state.runtime.Nodes[parentID]
+		if !ok {
+			return false, fmt.Errorf("node %s parent %s not executed", nodeID, parentID)
+		}
+		if parentData.Status == "skipped" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(parentNode.Kind), "branch") {
+			wantCase := strings.TrimSpace(e.Case)
+			if wantCase == "" {
+				return false, fmt.Errorf("node %s branch edge case required", nodeID)
+			}
+			gotCase, found, err := readSelectedBranchCase(parentData.Result)
+			if err != nil {
+				return false, fmt.Errorf("node %s branch parent %s invalid result: %w", nodeID, parentID, err)
+			}
+			if !found || gotCase != wantCase {
+				continue
+			}
+		} else if strings.TrimSpace(e.Case) != "" {
+			return false, fmt.Errorf("node %s non-branch edge.case unsupported", nodeID)
+		}
+		activeCount++
+	}
+	return activeCount > 0, nil
+}
+
 func waitRetryBackoff(ctx context.Context, backoff time.Duration) bool {
 	if backoff <= 0 {
 		return true
@@ -1714,6 +1866,128 @@ func decodeNodeCallSpec(n node) (callSpec, error) {
 func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n node) (code int, result json.RawMessage, err error) {
 	nodeID := strings.TrimSpace(n.ID)
 	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	if kind == "branch" {
+		spec, specErr := decodeNodeBranchSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		selectedCase, matchErr := evaluateBranchCases(spec, state)
+		if matchErr != nil {
+			return 400, nil, matchErr
+		}
+		return 1, mustJSON(map[string]any{"case": selectedCase}), nil
+	}
+	if kind == "foreach" {
+		spec, specErr := decodeNodeForeachSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		itemsValue, found, resolveErr := state.resolveBindingSource(spec.Source)
+		if resolveErr != nil {
+			return 400, nil, resolveErr
+		}
+		required := true
+		if spec.Required != nil {
+			required = *spec.Required
+		}
+		if !found {
+			if required {
+				return 400, nil, errors.New("foreach source missing")
+			}
+			return 1, json.RawMessage(`[]`), nil
+		}
+		items, ok := itemsValue.([]any)
+		if !ok {
+			return 400, nil, errors.New("foreach source must be array")
+		}
+		results := make([]any, 0, len(items))
+		for i, item := range items {
+			if ctx.Err() != nil {
+				return 408, nil, errors.New("timeout")
+			}
+			childState := newLoopRunState(state, item, i)
+			h.executeGraph(ctx, setReq{FlowID: childState.flowID, Graph: spec.Body}, spec.Body, childState)
+			childState.mu.Lock()
+			childStatus := childState.status
+			childMsg := childState.cancelReason
+			resultNode, ok := childState.runtime.Nodes[spec.ResultNodeID]
+			resultRaw := cloneRawJSON(resultNode.Result)
+			childState.mu.Unlock()
+			if childStatus != "succeeded" {
+				if childMsg == "" {
+					childMsg = "foreach body " + childStatus
+				}
+				return 500, nil, errors.New(childMsg)
+			}
+			if !ok {
+				return 500, nil, fmt.Errorf("foreach result_node_id not found: %s", spec.ResultNodeID)
+			}
+			var value any
+			if len(bytes.TrimSpace(resultRaw)) != 0 {
+				if err := json.Unmarshal(resultRaw, &value); err != nil {
+					return 500, nil, errors.New("invalid foreach result json")
+				}
+			}
+			results = append(results, value)
+		}
+		return 1, mustJSON(results), nil
+	}
+	if kind == "subflow" {
+		spec, specErr := decodeNodeSubflowSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		if flowExecutionContains(ctx, spec.FlowID) {
+			return 400, nil, errors.New("subflow recursion detected")
+		}
+		input, materializeErr := materializeSubflowInput(nodeID, spec, state)
+		if materializeErr != nil {
+			return 400, nil, materializeErr
+		}
+		h.mu.Lock()
+		childFlow, ok := h.flows[spec.FlowID]
+		h.mu.Unlock()
+		if !ok {
+			return 404, nil, fmt.Errorf("subflow target not found: %s", spec.FlowID)
+		}
+		childTrigger := buildSubflowTriggerContext(state, nodeID, input)
+		childState := newSubflowRunState(state, childFlow.FlowID, childTrigger)
+		childCtx := pushFlowExecutionContext(ctx, childFlow.FlowID)
+		h.executeGraph(childCtx, childFlow, childFlow.Graph, childState)
+		childState.mu.Lock()
+		childStatus := childState.status
+		childRunID := childState.runID
+		childMsg := childState.cancelReason
+		var childResult json.RawMessage
+		if spec.ResultNodeID != "" {
+			resultNode, ok := childState.runtime.Nodes[spec.ResultNodeID]
+			if !ok {
+				childState.mu.Unlock()
+				return 500, nil, fmt.Errorf("subflow result_node_id not found: %s", spec.ResultNodeID)
+			}
+			childResult = cloneRawJSON(resultNode.Result)
+		}
+		childState.mu.Unlock()
+		if childStatus != "succeeded" {
+			if childMsg == "" {
+				childMsg = "subflow " + childStatus
+			}
+			return 500, nil, errors.New(childMsg)
+		}
+		payload := map[string]any{
+			"flow_id": childFlow.FlowID,
+			"run_id":  childRunID,
+			"status":  childStatus,
+		}
+		if len(bytes.TrimSpace(childResult)) != 0 {
+			var value any
+			if err := json.Unmarshal(childResult, &value); err != nil {
+				return 500, nil, errors.New("invalid subflow result json")
+			}
+			payload["result"] = value
+		}
+		return 1, mustJSON(payload), nil
+	}
 	if kind == "compose" {
 		spec, specErr := decodeNodeComposeSpec(n)
 		if specErr != nil {
@@ -1741,6 +2015,17 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 				WriterNodeID: nodeID,
 			})
 			state.mu.Unlock()
+		}
+		return 1, out, nil
+	}
+	if kind == "transform" {
+		spec, specErr := decodeNodeTransformSpec(n)
+		if specErr != nil {
+			return 400, nil, specErr
+		}
+		out, materializeErr := materializeTransformResult(nodeID, spec, state)
+		if materializeErr != nil {
+			return 400, nil, materializeErr
 		}
 		return 1, out, nil
 	}
@@ -2282,7 +2567,15 @@ func (h *Handler) pruneRunsLocked(flowID string) []archivedRunRef {
 	return pruned
 }
 
+func validateGraphForFlow(flowID string, g graph) error {
+	return validateGraphScoped(strings.TrimSpace(flowID), g, bindingValidationOptions{})
+}
+
 func validateGraph(g graph) error {
+	return validateGraphForFlow("", g)
+}
+
+func validateGraphScoped(flowID string, g graph, opts bindingValidationOptions) error {
 	if len(g.Nodes) == 0 {
 		return errors.New("empty graph")
 	}
@@ -2305,14 +2598,57 @@ func validateGraph(g graph) error {
 		return err
 	}
 	for _, n := range g.Nodes {
-		if err := validateSetNodeKindAndSpec(strings.TrimSpace(n.ID), n, idx); err != nil {
+		if err := validateSetNodeKindAndSpec(flowID, strings.TrimSpace(n.ID), n, idx, opts); err != nil {
 			return err
+		}
+	}
+	if err := validateEdgeCases(g, idx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateEdgeCases(g graph, idx *graphIndex) error {
+	if idx == nil {
+		return errors.New("graph index required")
+	}
+	for _, n := range g.Nodes {
+		nodeID := strings.TrimSpace(n.ID)
+		kind := strings.ToLower(strings.TrimSpace(n.Kind))
+		outgoing := idx.outgoingEdges(nodeID)
+		if kind != "branch" {
+			for _, e := range outgoing {
+				if strings.TrimSpace(e.Case) != "" {
+					return fmt.Errorf("node %s edge.case only allowed for branch", nodeID)
+				}
+			}
+			continue
+		}
+		spec, err := decodeNodeBranchSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
+		}
+		allowed := make(map[string]struct{}, len(spec.Cases)+1)
+		for _, candidate := range spec.Cases {
+			allowed[strings.TrimSpace(candidate.Name)] = struct{}{}
+		}
+		if spec.DefaultCase != "" {
+			allowed[strings.TrimSpace(spec.DefaultCase)] = struct{}{}
+		}
+		for _, e := range outgoing {
+			caseName := strings.TrimSpace(e.Case)
+			if caseName == "" {
+				return fmt.Errorf("node %s branch edge to %s requires case", nodeID, strings.TrimSpace(e.To))
+			}
+			if _, ok := allowed[caseName]; !ok {
+				return fmt.Errorf("node %s branch edge case %q not declared", nodeID, caseName)
+			}
 		}
 	}
 	return nil
 }
 
-func validateSetNodeKindAndSpec(nodeID string, n node, idx *graphIndex) error {
+func validateSetNodeKindAndSpec(flowID, nodeID string, n node, idx *graphIndex, opts bindingValidationOptions) error {
 	if n.RetryBackoffMs != nil && *n.RetryBackoffMs < 0 {
 		return fmt.Errorf("node %s retry_backoff_ms must be >= 0", nodeID)
 	}
@@ -2323,21 +2659,45 @@ func validateSetNodeKindAndSpec(nodeID string, n node, idx *graphIndex) error {
 		if err := json.Unmarshal(n.Spec, &spec); err != nil {
 			return fmt.Errorf("node %s invalid call spec", nodeID)
 		}
-		return validateCallSpecForSet(nodeID, spec, idx)
+		return validateCallSpecForSet(nodeID, spec, idx, opts)
 	case "compose":
 		var spec composeSpec
 		if err := json.Unmarshal(n.Spec, &spec); err != nil {
 			return fmt.Errorf("node %s invalid compose spec", nodeID)
 		}
-		return validateComposeSpecForSet(nodeID, spec, idx)
+		return validateComposeSpecForSet(nodeID, spec, idx, opts)
 	case "set_var":
 		var spec setVarSpec
 		if err := json.Unmarshal(n.Spec, &spec); err != nil {
 			return fmt.Errorf("node %s invalid set_var spec", nodeID)
 		}
-		return validateSetVarSpecForSet(nodeID, spec, idx)
+		return validateSetVarSpecForSet(nodeID, spec, idx, opts)
+	case "transform":
+		spec, err := decodeNodeTransformSpec(n)
+		if err != nil {
+			return err
+		}
+		return validateTransformSpecForSet(nodeID, spec, idx, opts)
+	case "branch":
+		spec, err := decodeNodeBranchSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
+		}
+		return validateBranchSpecForSet(nodeID, spec, idx, opts)
+	case "foreach":
+		spec, err := decodeNodeForeachSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
+		}
+		return validateForeachSpecForSet(flowID, nodeID, spec, idx, opts)
+	case "subflow":
+		spec, err := decodeNodeSubflowSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
+		}
+		return validateSubflowSpecForSet(flowID, nodeID, spec, idx, opts)
 	default:
-		return fmt.Errorf("node %s kind must be call, compose or set_var", nodeID)
+		return fmt.Errorf("node %s kind must be call, compose, transform, set_var, branch, foreach or subflow", nodeID)
 	}
 }
 
@@ -2410,6 +2770,9 @@ func (h *Handler) loadFlowsFromDisk() error {
 			continue
 		}
 		if validateFlowRunConfig(req) != nil {
+			continue
+		}
+		if validateGraphForFlow(req.FlowID, req.Graph) != nil {
 			continue
 		}
 		loaded[req.FlowID] = req
@@ -2560,31 +2923,65 @@ func (h *Handler) restartScheduler(flowID string) {
 		h.mu.Unlock()
 		return
 	}
-	if triggerType(flow.Trigger) != triggerTypeInterval {
-		h.mu.Unlock()
-		return
-	}
-	every := time.Duration(flow.Trigger.EveryMs) * time.Millisecond
-	if every <= 0 {
-		h.mu.Unlock()
-		return
-	}
 	stop := make(chan struct{})
 	h.schedulers[flowID] = &flowScheduler{stop: stop}
+	triggerKind := triggerType(flow.Trigger)
+	cronExpr := strings.TrimSpace(flow.Trigger.Cron)
+	every := time.Duration(flow.Trigger.EveryMs) * time.Millisecond
 	h.mu.Unlock()
-	go func() {
-		t := time.NewTicker(every)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-t.C:
-				// interval 触发：避免并发重入（同一 flow 同时仅一个 run）
-				h.tryStartScheduledRun(flowID)
-			}
+	switch triggerKind {
+	case triggerTypeInterval:
+		if every <= 0 {
+			h.mu.Lock()
+			delete(h.schedulers, flowID)
+			h.mu.Unlock()
+			return
 		}
-	}()
+		go func() {
+			t := time.NewTicker(every)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					h.tryStartScheduledRun(flowID)
+				}
+			}
+		}()
+	case triggerTypeCron:
+		schedule, err := parseCronExpr(cronExpr)
+		if err != nil {
+			h.mu.Lock()
+			delete(h.schedulers, flowID)
+			h.mu.Unlock()
+			return
+		}
+		go func() {
+			for {
+				next := schedule.NextAfter(time.Now())
+				if next.IsZero() {
+					return
+				}
+				wait := time.Until(next)
+				if wait < 0 {
+					wait = 0
+				}
+				timer := time.NewTimer(wait)
+				select {
+				case <-stop:
+					timer.Stop()
+					return
+				case <-timer.C:
+					h.tryStartRunWithTrigger(flowID, buildCronTriggerContext(next, cronExpr))
+				}
+			}
+		}()
+	default:
+		h.mu.Lock()
+		delete(h.schedulers, flowID)
+		h.mu.Unlock()
+	}
 }
 
 func (h *Handler) tryStartScheduledRun(flowID string) {
@@ -2787,6 +3184,181 @@ func (h *Handler) newQueuedRunStateLocked(flow setReq, triggerCtx json.RawMessag
 		cancel:  cancel,
 		runtime: newRunContext(flow.FlowID, runID, executorNode, triggerCtx),
 	}
+}
+
+type cronField struct {
+	any     bool
+	allowed map[int]struct{}
+}
+
+type cronSchedule struct {
+	minute     cronField
+	hour       cronField
+	dayOfMonth cronField
+	month      cronField
+	dayOfWeek  cronField
+}
+
+func parseCronExpr(expr string) (cronSchedule, error) {
+	parts := strings.Fields(strings.TrimSpace(expr))
+	if len(parts) != 5 {
+		return cronSchedule{}, errors.New("cron must have 5 fields")
+	}
+	minute, err := parseCronField(parts[0], 0, 59, false)
+	if err != nil {
+		return cronSchedule{}, fmt.Errorf("minute: %w", err)
+	}
+	hour, err := parseCronField(parts[1], 0, 23, false)
+	if err != nil {
+		return cronSchedule{}, fmt.Errorf("hour: %w", err)
+	}
+	dayOfMonth, err := parseCronField(parts[2], 1, 31, false)
+	if err != nil {
+		return cronSchedule{}, fmt.Errorf("day-of-month: %w", err)
+	}
+	month, err := parseCronField(parts[3], 1, 12, false)
+	if err != nil {
+		return cronSchedule{}, fmt.Errorf("month: %w", err)
+	}
+	dayOfWeek, err := parseCronField(parts[4], 0, 7, true)
+	if err != nil {
+		return cronSchedule{}, fmt.Errorf("day-of-week: %w", err)
+	}
+	return cronSchedule{
+		minute:     minute,
+		hour:       hour,
+		dayOfMonth: dayOfMonth,
+		month:      month,
+		dayOfWeek:  dayOfWeek,
+	}, nil
+}
+
+func parseCronField(raw string, min, max int, sundayAlias bool) (cronField, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return cronField{}, errors.New("field required")
+	}
+	if raw == "*" {
+		return cronField{any: true}, nil
+	}
+	allowed := make(map[int]struct{})
+	for _, token := range strings.Split(raw, ",") {
+		values, err := expandCronToken(token, min, max, sundayAlias)
+		if err != nil {
+			return cronField{}, err
+		}
+		for _, value := range values {
+			allowed[value] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return cronField{}, errors.New("empty field")
+	}
+	return cronField{allowed: allowed}, nil
+}
+
+func expandCronToken(token string, min, max int, sundayAlias bool) ([]int, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errors.New("empty token")
+	}
+	step := 1
+	base := token
+	if slash := strings.Index(token, "/"); slash >= 0 {
+		base = strings.TrimSpace(token[:slash])
+		stepValue, err := strconv.Atoi(strings.TrimSpace(token[slash+1:]))
+		if err != nil || stepValue <= 0 {
+			return nil, errors.New("invalid step")
+		}
+		step = stepValue
+	}
+	start := min
+	end := max
+	if base != "*" {
+		if dash := strings.Index(base, "-"); dash >= 0 {
+			left, err := parseCronValue(base[:dash], min, max, sundayAlias)
+			if err != nil {
+				return nil, err
+			}
+			right, err := parseCronValue(base[dash+1:], min, max, sundayAlias)
+			if err != nil {
+				return nil, err
+			}
+			if left > right {
+				return nil, errors.New("invalid range")
+			}
+			start = left
+			end = right
+		} else {
+			value, err := parseCronValue(base, min, max, sundayAlias)
+			if err != nil {
+				return nil, err
+			}
+			start = value
+			end = value
+		}
+	}
+	values := make([]int, 0, end-start+1)
+	for value := start; value <= end; value += step {
+		if sundayAlias && value == 7 {
+			values = append(values, 0)
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func parseCronValue(raw string, min, max int, sundayAlias bool) (int, error) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, errors.New("invalid value")
+	}
+	if sundayAlias && value == 7 {
+		return 7, nil
+	}
+	if value < min || value > max {
+		return 0, errors.New("value out of range")
+	}
+	return value, nil
+}
+
+func (f cronField) matches(value int) bool {
+	if f.any {
+		return true
+	}
+	_, ok := f.allowed[value]
+	return ok
+}
+
+func (s cronSchedule) matches(t time.Time) bool {
+	local := t.In(time.Local)
+	if !s.month.matches(int(local.Month())) || !s.hour.matches(local.Hour()) || !s.minute.matches(local.Minute()) {
+		return false
+	}
+	dayOfMonthMatch := s.dayOfMonth.matches(local.Day())
+	dayOfWeekMatch := s.dayOfWeek.matches(int(local.Weekday()))
+	switch {
+	case s.dayOfMonth.any && s.dayOfWeek.any:
+		return true
+	case s.dayOfMonth.any:
+		return dayOfWeekMatch
+	case s.dayOfWeek.any:
+		return dayOfMonthMatch
+	default:
+		return dayOfMonthMatch || dayOfWeekMatch
+	}
+}
+
+func (s cronSchedule) NextAfter(now time.Time) time.Time {
+	candidate := now.In(time.Local).Truncate(time.Minute).Add(time.Minute)
+	for i := 0; i < 60*24*366*5; i++ {
+		if s.matches(candidate) {
+			return candidate
+		}
+		candidate = candidate.Add(time.Minute)
+	}
+	return time.Time{}
 }
 
 func newUUID() string {
