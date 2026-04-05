@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -39,75 +40,6 @@ type varRuntimeData struct {
 	WriterNodeID string          `json:"writer_node_id,omitempty"`
 }
 
-type inputBinding struct {
-	To       string        `json:"to"`
-	Source   bindingSource `json:"source"`
-	Required bool          `json:"required,omitempty"`
-}
-
-type bindingSource struct {
-	Kind   string `json:"kind"`
-	NodeID string `json:"node_id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Path   string `json:"path,omitempty"`
-	Field  string `json:"field,omitempty"`
-}
-
-type composeSpec struct {
-	Template json.RawMessage `json:"template"`
-	Inputs   []inputBinding  `json:"inputs,omitempty"`
-}
-
-type setVarSpec struct {
-	Name     string          `json:"name"`
-	Template json.RawMessage `json:"template,omitempty"`
-	Inputs   []inputBinding  `json:"inputs,omitempty"`
-}
-
-type transformSpec struct {
-	Expr transformExpr `json:"expr"`
-}
-
-type transformExpr struct {
-	Literal  json.RawMessage          `json:"literal,omitempty"`
-	Source   *bindingSource           `json:"source,omitempty"`
-	Required *bool                    `json:"required,omitempty"`
-	Op       string                   `json:"op,omitempty"`
-	Args     []transformExpr          `json:"args,omitempty"`
-	Object   map[string]transformExpr `json:"object,omitempty"`
-	Array    []transformExpr          `json:"array,omitempty"`
-}
-
-type branchSpec struct {
-	Cases       []branchCase `json:"cases"`
-	DefaultCase string       `json:"default_case,omitempty"`
-}
-
-type branchCase struct {
-	Name  string      `json:"name"`
-	Match branchMatch `json:"match"`
-}
-
-type branchMatch struct {
-	Source bindingSource   `json:"source"`
-	Op     string          `json:"op"`
-	Value  json.RawMessage `json:"value,omitempty"`
-}
-
-type foreachSpec struct {
-	Source       bindingSource `json:"source"`
-	Required     *bool         `json:"required,omitempty"`
-	Body         graph         `json:"body"`
-	ResultNodeID string        `json:"result_node_id"`
-}
-
-type subflowSpec struct {
-	FlowID        string          `json:"flow_id"`
-	InputTemplate json.RawMessage `json:"input_template,omitempty"`
-	Inputs        []inputBinding  `json:"inputs,omitempty"`
-	ResultNodeID  string          `json:"result_node_id,omitempty"`
-}
-
 type bindingValidationOptions struct {
 	allowLoop bool
 }
@@ -118,6 +50,63 @@ type graphIndex struct {
 	setVarWriters map[string][]string
 	incoming      map[string][]edge
 	outgoing      map[string][]edge
+}
+
+func normalizeNodeKind(kind nodeKind) nodeKind {
+	switch nodeKind(strings.ToLower(strings.TrimSpace(string(kind)))) {
+	case nodeKindCall:
+		return nodeKindCall
+	case nodeKindCompose:
+		return nodeKindCompose
+	case nodeKindTransform:
+		return nodeKindTransform
+	case nodeKindSetVar:
+		return nodeKindSetVar
+	case nodeKindBranch:
+		return nodeKindBranch
+	case nodeKindForeach:
+		return nodeKindForeach
+	case nodeKindSubflow:
+		return nodeKindSubflow
+	default:
+		return nodeKind(strings.ToLower(strings.TrimSpace(string(kind))))
+	}
+}
+
+func normalizeBindingSourceKind(kind bindingSourceKind) bindingSourceKind {
+	switch bindingSourceKind(strings.ToLower(strings.TrimSpace(string(kind)))) {
+	case bindingSourceNodeResult:
+		return bindingSourceNodeResult
+	case bindingSourceTrigger:
+		return bindingSourceTrigger
+	case bindingSourceFlowMeta:
+		return bindingSourceFlowMeta
+	case bindingSourceRunMeta:
+		return bindingSourceRunMeta
+	case bindingSourceLoopItem:
+		return bindingSourceLoopItem
+	case bindingSourceLoopIndex:
+		return bindingSourceLoopIndex
+	case bindingSourceFlowVar:
+		return bindingSourceFlowVar
+	default:
+		return bindingSourceKind(strings.ToLower(strings.TrimSpace(string(kind))))
+	}
+}
+
+func decodeJSONStrict(raw json.RawMessage, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(struct{})); err != io.EOF {
+		if err == nil {
+			return errors.New("unexpected trailing json content")
+		}
+		return err
+	}
+	return nil
 }
 
 func newRunContext(flowID, runID string, executorNode uint32, triggerCtx json.RawMessage) runContext {
@@ -274,9 +263,9 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 	if s == nil {
 		return nil, false, errors.New("run context required")
 	}
-	kind := strings.ToLower(strings.TrimSpace(src.Kind))
+	kind := normalizeBindingSourceKind(src.Kind)
 	switch kind {
-	case "node_result":
+	case bindingSourceNodeResult:
 		nodeID := strings.TrimSpace(src.NodeID)
 		if nodeID == "" {
 			return nil, false, errors.New("node_result node_id required")
@@ -289,12 +278,12 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 			return nil, false, nil
 		}
 		return readJSONSourceValue(raw, src.Path)
-	case "trigger":
+	case bindingSourceTrigger:
 		s.mu.Lock()
 		raw := cloneRawJSON(s.runtime.Trigger)
 		s.mu.Unlock()
 		return readJSONSourceValue(raw, src.Path)
-	case "flow_meta":
+	case bindingSourceFlowMeta:
 		field := strings.TrimSpace(src.Field)
 		if field != "flow_id" {
 			return nil, false, fmt.Errorf("unsupported flow_meta field: %s", field)
@@ -303,7 +292,7 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 		flowID := s.runtime.FlowID
 		s.mu.Unlock()
 		return flowID, true, nil
-	case "run_meta":
+	case bindingSourceRunMeta:
 		field := strings.TrimSpace(src.Field)
 		if field != "run_id" {
 			return nil, false, fmt.Errorf("unsupported run_meta field: %s", field)
@@ -312,7 +301,7 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 		runID := s.runtime.RunID
 		s.mu.Unlock()
 		return runID, true, nil
-	case "flow_var":
+	case bindingSourceFlowVar:
 		name := strings.TrimSpace(src.Name)
 		if name == "" {
 			return nil, false, errors.New("flow_var name required")
@@ -325,7 +314,7 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 			return nil, false, nil
 		}
 		return readJSONSourceValue(raw, src.Path)
-	case "loop_item":
+	case bindingSourceLoopItem:
 		s.mu.Lock()
 		loop := s.runtime.Loop
 		var raw json.RawMessage
@@ -337,7 +326,7 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 			return nil, false, nil
 		}
 		return readJSONSourceValue(raw, src.Path)
-	case "loop_index":
+	case bindingSourceLoopIndex:
 		s.mu.Lock()
 		loop := s.runtime.Loop
 		s.mu.Unlock()
@@ -346,16 +335,12 @@ func (s *runState) resolveBindingSource(src bindingSource) (any, bool, error) {
 		}
 		return loop.Index, true, nil
 	default:
-		return nil, false, fmt.Errorf("unsupported binding source kind: %s", kind)
+		return nil, false, fmt.Errorf("unsupported binding source kind: %s", string(kind))
 	}
 }
 
 func materializeCallArgs(nodeID string, spec callSpec, state *runState) (json.RawMessage, error) {
-	base := spec.ArgsTemplate
-	if len(bytes.TrimSpace(base)) == 0 {
-		base = spec.Args
-	}
-	return materializeBoundJSON(nodeID, "call args", base, spec.Inputs, state)
+	return materializeBoundJSON(nodeID, "call args", spec.ArgsTemplate, spec.Inputs, state)
 }
 
 func materializeComposeResult(nodeID string, spec composeSpec, state *runState) (json.RawMessage, error) {
@@ -984,11 +969,7 @@ func validateCallSpecForSet(nodeID string, spec callSpec, idx *graphIndex, opts 
 	if strings.TrimSpace(spec.Method) == "" {
 		return fmt.Errorf("node %s call method required", nodeID)
 	}
-	base := spec.ArgsTemplate
-	if len(bytes.TrimSpace(base)) == 0 {
-		base = spec.Args
-	}
-	if _, err := normalizeTemplateJSON(base); err != nil {
+	if _, err := normalizeTemplateJSON(spec.ArgsTemplate); err != nil {
 		return fmt.Errorf("node %s invalid call args template", nodeID)
 	}
 	return validateBindings(nodeID, spec.Inputs, idx, opts)
@@ -1040,7 +1021,7 @@ func validateBranchSpecForSet(nodeID string, spec branchSpec, idx *graphIndex, o
 		if op == "" {
 			return fmt.Errorf("node %s branch case %q invalid match op", nodeID, name)
 		}
-		if op != "exists" {
+		if op != branchMatchExists {
 			if len(bytes.TrimSpace(candidate.Match.Value)) == 0 {
 				return fmt.Errorf("node %s branch case %q match value required", nodeID, name)
 			}
@@ -1102,9 +1083,9 @@ func validateBindingSourceForSet(nodeID string, inputIndex int, src bindingSourc
 }
 
 func validateBindingSourceForSetLabel(nodeID, label string, src bindingSource, idx *graphIndex, opts bindingValidationOptions) error {
-	kind := strings.ToLower(strings.TrimSpace(src.Kind))
+	kind := normalizeBindingSourceKind(src.Kind)
 	switch kind {
-	case "node_result":
+	case bindingSourceNodeResult:
 		refNodeID := strings.TrimSpace(src.NodeID)
 		if refNodeID == "" {
 			return fmt.Errorf("node %s %s node_result node_id required", nodeID, label)
@@ -1118,19 +1099,19 @@ func validateBindingSourceForSetLabel(nodeID, label string, src bindingSource, i
 		if _, err := parseJSONPointer(src.Path); err != nil {
 			return fmt.Errorf("node %s %s invalid node_result path", nodeID, label)
 		}
-	case "trigger":
+	case bindingSourceTrigger:
 		if _, err := parseJSONPointer(src.Path); err != nil {
 			return fmt.Errorf("node %s %s invalid trigger path", nodeID, label)
 		}
-	case "flow_meta":
+	case bindingSourceFlowMeta:
 		if strings.TrimSpace(src.Field) != "flow_id" {
 			return fmt.Errorf("node %s %s invalid flow_meta field", nodeID, label)
 		}
-	case "run_meta":
+	case bindingSourceRunMeta:
 		if strings.TrimSpace(src.Field) != "run_id" {
 			return fmt.Errorf("node %s %s invalid run_meta field", nodeID, label)
 		}
-	case "flow_var":
+	case bindingSourceFlowVar:
 		name := strings.TrimSpace(src.Name)
 		if !isValidSetVarName(name) {
 			return fmt.Errorf("node %s %s invalid flow_var name", nodeID, label)
@@ -1144,14 +1125,14 @@ func validateBindingSourceForSetLabel(nodeID, label string, src bindingSource, i
 		if _, err := parseJSONPointer(src.Path); err != nil {
 			return fmt.Errorf("node %s %s invalid flow_var path", nodeID, label)
 		}
-	case "loop_item":
+	case bindingSourceLoopItem:
 		if !opts.allowLoop {
 			return fmt.Errorf("node %s %s loop_item only allowed in foreach body", nodeID, label)
 		}
 		if _, err := parseJSONPointer(src.Path); err != nil {
 			return fmt.Errorf("node %s %s invalid loop_item path", nodeID, label)
 		}
-	case "loop_index":
+	case bindingSourceLoopIndex:
 		if !opts.allowLoop {
 			return fmt.Errorf("node %s %s loop_index only allowed in foreach body", nodeID, label)
 		}
@@ -1298,7 +1279,7 @@ func collectSetVarWriters(g graph, idx *graphIndex) error {
 		return errors.New("graph index required")
 	}
 	for _, n := range g.Nodes {
-		if !strings.EqualFold(strings.TrimSpace(n.Kind), "set_var") {
+		if normalizeNodeKind(n.Kind) != nodeKindSetVar {
 			continue
 		}
 		spec, err := decodeNodeSetVarSpec(n)
@@ -1312,7 +1293,7 @@ func collectSetVarWriters(g graph, idx *graphIndex) error {
 
 func decodeNodeComposeSpec(n node) (composeSpec, error) {
 	var spec composeSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+	if err := decodeJSONStrict(n.Spec, &spec); err != nil {
 		return composeSpec{}, errors.New("invalid compose spec")
 	}
 	if len(bytes.TrimSpace(spec.Template)) == 0 {
@@ -1326,7 +1307,7 @@ func decodeNodeComposeSpec(n node) (composeSpec, error) {
 
 func decodeNodeSetVarSpec(n node) (setVarSpec, error) {
 	var spec setVarSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+	if err := decodeJSONStrict(n.Spec, &spec); err != nil {
 		return setVarSpec{}, errors.New("invalid set_var spec")
 	}
 	spec.Name = strings.TrimSpace(spec.Name)
@@ -1341,7 +1322,7 @@ func decodeNodeSetVarSpec(n node) (setVarSpec, error) {
 
 func decodeNodeTransformSpec(n node) (transformSpec, error) {
 	var spec transformSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+	if err := decodeJSONStrict(n.Spec, &spec); err != nil {
 		return transformSpec{}, errors.New("invalid transform spec")
 	}
 	if err := validateTransformExprShape(strings.TrimSpace(n.ID), "expr", spec.Expr); err != nil {
@@ -1352,7 +1333,7 @@ func decodeNodeTransformSpec(n node) (transformSpec, error) {
 
 func decodeNodeBranchSpec(n node) (branchSpec, error) {
 	var spec branchSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+	if err := decodeJSONStrict(n.Spec, &spec); err != nil {
 		return branchSpec{}, errors.New("invalid branch spec")
 	}
 	if len(spec.Cases) == 0 {
@@ -1372,7 +1353,7 @@ func decodeNodeBranchSpec(n node) (branchSpec, error) {
 		if spec.Cases[i].Match.Op == "" {
 			return branchSpec{}, fmt.Errorf("branch case %q match op unsupported", spec.Cases[i].Name)
 		}
-		if spec.Cases[i].Match.Op != "exists" {
+		if spec.Cases[i].Match.Op != branchMatchExists {
 			if len(bytes.TrimSpace(spec.Cases[i].Match.Value)) == 0 {
 				return branchSpec{}, fmt.Errorf("branch case %q match value required", spec.Cases[i].Name)
 			}
@@ -1389,7 +1370,7 @@ func decodeNodeBranchSpec(n node) (branchSpec, error) {
 
 func decodeNodeForeachSpec(n node) (foreachSpec, error) {
 	var spec foreachSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+	if err := decodeJSONStrict(n.Spec, &spec); err != nil {
 		return foreachSpec{}, errors.New("invalid foreach spec")
 	}
 	spec.ResultNodeID = strings.TrimSpace(spec.ResultNodeID)
@@ -1404,7 +1385,7 @@ func decodeNodeForeachSpec(n node) (foreachSpec, error) {
 
 func decodeNodeSubflowSpec(n node) (subflowSpec, error) {
 	var spec subflowSpec
-	if err := json.Unmarshal(n.Spec, &spec); err != nil {
+	if err := decodeJSONStrict(n.Spec, &spec); err != nil {
 		return subflowSpec{}, errors.New("invalid subflow spec")
 	}
 	var err error
@@ -1419,22 +1400,22 @@ func decodeNodeSubflowSpec(n node) (subflowSpec, error) {
 	return spec, nil
 }
 
-func normalizeBranchMatchOp(op string) string {
-	switch strings.ToLower(strings.TrimSpace(op)) {
-	case "eq":
-		return "eq"
-	case "ne":
-		return "ne"
-	case "gt":
-		return "gt"
-	case "gte":
-		return "gte"
-	case "lt":
-		return "lt"
-	case "lte":
-		return "lte"
-	case "exists":
-		return "exists"
+func normalizeBranchMatchOp(op branchMatchOp) branchMatchOp {
+	switch branchMatchOp(strings.ToLower(strings.TrimSpace(string(op)))) {
+	case branchMatchEq:
+		return branchMatchEq
+	case branchMatchNe:
+		return branchMatchNe
+	case branchMatchGt:
+		return branchMatchGt
+	case branchMatchGte:
+		return branchMatchGte
+	case branchMatchLt:
+		return branchMatchLt
+	case branchMatchLte:
+		return branchMatchLte
+	case branchMatchExists:
+		return branchMatchExists
 	default:
 		return ""
 	}
@@ -1476,24 +1457,25 @@ func evaluateBranchMatch(match branchMatch, state *runState) (bool, error) {
 	if state == nil {
 		return false, errors.New("branch run context required")
 	}
+	match.Op = normalizeBranchMatchOp(match.Op)
 	value, found, err := state.resolveBindingSource(match.Source)
 	if err != nil {
 		return false, err
 	}
-	if match.Op == "exists" {
+	if match.Op == branchMatchExists {
 		return found, nil
 	}
 	if !found {
 		return false, nil
 	}
 	switch match.Op {
-	case "eq":
+	case branchMatchEq:
 		ok, err := jsonValuesEqual(value, match.Value)
 		return ok, err
-	case "ne":
+	case branchMatchNe:
 		ok, err := jsonValuesEqual(value, match.Value)
 		return !ok, err
-	case "gt", "gte", "lt", "lte":
+	case branchMatchGt, branchMatchGte, branchMatchLt, branchMatchLte:
 		actual, err := jsonNumberValue(value)
 		if err != nil {
 			return false, err
@@ -1503,13 +1485,13 @@ func evaluateBranchMatch(match branchMatch, state *runState) (bool, error) {
 			return false, errors.New("branch numeric match value required")
 		}
 		switch match.Op {
-		case "gt":
+		case branchMatchGt:
 			return actual > want, nil
-		case "gte":
+		case branchMatchGte:
 			return actual >= want, nil
-		case "lt":
+		case branchMatchLt:
 			return actual < want, nil
-		case "lte":
+		case branchMatchLte:
 			return actual <= want, nil
 		}
 	}

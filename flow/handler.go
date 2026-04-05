@@ -1770,7 +1770,7 @@ func shouldExecuteNode(idx *graphIndex, nodeID string, state *runState) (bool, e
 		if parentData.Status == "skipped" {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(parentNode.Kind), "branch") {
+		if normalizeNodeKind(parentNode.Kind) == nodeKindBranch {
 			wantCase := strings.TrimSpace(e.Case)
 			if wantCase == "" {
 				return false, fmt.Errorf("node %s branch edge case required", nodeID)
@@ -1804,20 +1804,15 @@ func waitRetryBackoff(ctx context.Context, backoff time.Duration) bool {
 	}
 }
 
-type callSpec struct {
-	Target       uint32          `json:"target,omitempty"`
-	Method       string          `json:"method"`
-	Args         json.RawMessage `json:"args,omitempty"`
-	ArgsTemplate json.RawMessage `json:"args_template,omitempty"`
-	Inputs       []inputBinding  `json:"inputs,omitempty"`
-}
-
 func decodeNodeCallSpec(n node) (callSpec, error) {
-	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	kind := normalizeNodeKind(n.Kind)
 	switch kind {
-	case "call":
+	case nodeKindCall:
 		var spec callSpec
-		if err := json.Unmarshal(n.Spec, &spec); err != nil {
+		if err := decodeJSONStrict(n.Spec, &spec); err != nil {
+			if strings.Contains(err.Error(), `unknown field "args"`) {
+				return callSpec{}, errors.New("call args is no longer supported; use args_template")
+			}
 			return callSpec{}, errors.New("invalid call spec")
 		}
 		spec.Method = strings.TrimSpace(spec.Method)
@@ -1826,14 +1821,14 @@ func decodeNodeCallSpec(n node) (callSpec, error) {
 		}
 		return spec, nil
 	default:
-		return callSpec{}, fmt.Errorf("unknown node kind: %s", kind)
+		return callSpec{}, fmt.Errorf("unknown node kind: %s", string(kind))
 	}
 }
 
 func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n node) (code int, result json.RawMessage, err error) {
 	nodeID := strings.TrimSpace(n.ID)
-	kind := strings.ToLower(strings.TrimSpace(n.Kind))
-	if kind == "branch" {
+	kind := normalizeNodeKind(n.Kind)
+	if kind == nodeKindBranch {
 		spec, specErr := decodeNodeBranchSpec(n)
 		if specErr != nil {
 			return 400, nil, specErr
@@ -1844,7 +1839,7 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 		}
 		return 1, mustJSON(map[string]any{"case": selectedCase}), nil
 	}
-	if kind == "foreach" {
+	if kind == nodeKindForeach {
 		spec, specErr := decodeNodeForeachSpec(n)
 		if specErr != nil {
 			return 400, nil, specErr
@@ -1899,7 +1894,7 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 		}
 		return 1, mustJSON(results), nil
 	}
-	if kind == "subflow" {
+	if kind == nodeKindSubflow {
 		spec, specErr := decodeNodeSubflowSpec(n)
 		if specErr != nil {
 			return 400, nil, specErr
@@ -1955,7 +1950,7 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 		}
 		return 1, mustJSON(payload), nil
 	}
-	if kind == "compose" {
+	if kind == nodeKindCompose {
 		spec, specErr := decodeNodeComposeSpec(n)
 		if specErr != nil {
 			return 400, nil, specErr
@@ -1966,7 +1961,7 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 		}
 		return 1, out, nil
 	}
-	if kind == "set_var" {
+	if kind == nodeKindSetVar {
 		spec, specErr := decodeNodeSetVarSpec(n)
 		if specErr != nil {
 			return 400, nil, specErr
@@ -1985,7 +1980,7 @@ func (h *Handler) executeNode(ctx context.Context, _ setReq, state *runState, n 
 		}
 		return 1, out, nil
 	}
-	if kind == "transform" {
+	if kind == nodeKindTransform {
 		spec, specErr := decodeNodeTransformSpec(n)
 		if specErr != nil {
 			return 400, nil, specErr
@@ -2581,9 +2576,9 @@ func validateEdgeCases(g graph, idx *graphIndex) error {
 	}
 	for _, n := range g.Nodes {
 		nodeID := strings.TrimSpace(n.ID)
-		kind := strings.ToLower(strings.TrimSpace(n.Kind))
+		kind := normalizeNodeKind(n.Kind)
 		outgoing := idx.outgoingEdges(nodeID)
-		if kind != "branch" {
+		if kind != nodeKindBranch {
 			for _, e := range outgoing {
 				if strings.TrimSpace(e.Case) != "" {
 					return fmt.Errorf("node %s edge.case only allowed for branch", nodeID)
@@ -2619,45 +2614,45 @@ func validateSetNodeKindAndSpec(flowID, nodeID string, n node, idx *graphIndex, 
 	if n.RetryBackoffMs != nil && *n.RetryBackoffMs < 0 {
 		return fmt.Errorf("node %s retry_backoff_ms must be >= 0", nodeID)
 	}
-	kind := strings.ToLower(strings.TrimSpace(n.Kind))
+	kind := normalizeNodeKind(n.Kind)
 	switch kind {
-	case "call":
-		var spec callSpec
-		if err := json.Unmarshal(n.Spec, &spec); err != nil {
-			return fmt.Errorf("node %s invalid call spec", nodeID)
+	case nodeKindCall:
+		spec, err := decodeNodeCallSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
 		}
 		return validateCallSpecForSet(nodeID, spec, idx, opts)
-	case "compose":
-		var spec composeSpec
-		if err := json.Unmarshal(n.Spec, &spec); err != nil {
-			return fmt.Errorf("node %s invalid compose spec", nodeID)
+	case nodeKindCompose:
+		spec, err := decodeNodeComposeSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
 		}
 		return validateComposeSpecForSet(nodeID, spec, idx, opts)
-	case "set_var":
-		var spec setVarSpec
-		if err := json.Unmarshal(n.Spec, &spec); err != nil {
-			return fmt.Errorf("node %s invalid set_var spec", nodeID)
+	case nodeKindSetVar:
+		spec, err := decodeNodeSetVarSpec(n)
+		if err != nil {
+			return fmt.Errorf("node %s %w", nodeID, err)
 		}
 		return validateSetVarSpecForSet(nodeID, spec, idx, opts)
-	case "transform":
+	case nodeKindTransform:
 		spec, err := decodeNodeTransformSpec(n)
 		if err != nil {
-			return err
+			return fmt.Errorf("node %s %w", nodeID, err)
 		}
 		return validateTransformSpecForSet(nodeID, spec, idx, opts)
-	case "branch":
+	case nodeKindBranch:
 		spec, err := decodeNodeBranchSpec(n)
 		if err != nil {
 			return fmt.Errorf("node %s %w", nodeID, err)
 		}
 		return validateBranchSpecForSet(nodeID, spec, idx, opts)
-	case "foreach":
+	case nodeKindForeach:
 		spec, err := decodeNodeForeachSpec(n)
 		if err != nil {
 			return fmt.Errorf("node %s %w", nodeID, err)
 		}
 		return validateForeachSpecForSet(flowID, nodeID, spec, idx, opts)
-	case "subflow":
+	case nodeKindSubflow:
 		spec, err := decodeNodeSubflowSpec(n)
 		if err != nil {
 			return fmt.Errorf("node %s %w", nodeID, err)

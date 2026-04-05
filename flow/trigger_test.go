@@ -420,7 +420,7 @@ func TestTriggerStartedRunPreservesServerContextForLocalCapability(t *testing.T)
 				{
 					ID:   "n1",
 					Kind: "call",
-					Spec: json.RawMessage(fmt.Sprintf(`{"method":"%s","args":{"ok":true}}`, method)),
+					Spec: json.RawMessage(fmt.Sprintf(`{"method":"%s","args_template":{"ok":true}}`, method)),
 				},
 			},
 		},
@@ -450,7 +450,7 @@ func makeTestFlow(flowID string, tr trigger) setReq {
 				{
 					ID:   "n1",
 					Kind: "call",
-					Spec: []byte(`{"method":"debug::echo","args":{"ok":true}}`),
+					Spec: []byte(`{"method":"debug::echo","args_template":{"ok":true}}`),
 				},
 			},
 			Edges: nil,

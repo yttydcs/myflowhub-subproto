@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestFlowCallNodeFallsBackToCapabilityRegistry(t *testing.T) {
 	n := node{
 		ID:   "n1",
 		Kind: "call",
-		Spec: json.RawMessage(`{"method":"test::cap","args":{"x":1}}`),
+		Spec: json.RawMessage(`{"method":"test::cap","args_template":{"x":1}}`),
 	}
 
 	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
@@ -72,7 +73,7 @@ func TestFlowCallNodeMethodTakesPrecedenceOverCapabilityRegistry(t *testing.T) {
 	n := node{
 		ID:   "n1",
 		Kind: "call",
-		Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"world"}}`),
+		Spec: json.RawMessage(`{"method":"debug::echo","args_template":{"hello":"world"}}`),
 	}
 
 	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
@@ -96,7 +97,7 @@ func TestFlowLegacyLocalNodeRejectedAtRuntime(t *testing.T) {
 	n := node{
 		ID:   "n1",
 		Kind: "local",
-		Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"legacy"}}`),
+		Spec: json.RawMessage(`{"method":"debug::echo","args_template":{"hello":"legacy"}}`),
 	}
 
 	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
@@ -105,6 +106,30 @@ func TestFlowLegacyLocalNodeRejectedAtRuntime(t *testing.T) {
 	}
 	if code != 400 {
 		t.Fatalf("expected legacy local node to fail with 400, got=%d", code)
+	}
+}
+
+func TestFlowLegacyCallArgsRejectedAtRuntime(t *testing.T) {
+	cfg := coreconfig.NewMap(map[string]string{})
+	h := NewHandlerWithConfig(cfg, nil)
+	srv := &testServer{nodeID: 1, cm: connmgr.New()}
+	h.srv = srv
+	ctx := core.WithServerContext(context.Background(), srv)
+	n := node{
+		ID:   "n1",
+		Kind: "call",
+		Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"legacy"}}`),
+	}
+
+	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
+	if runErr == nil {
+		t.Fatal("expected legacy call args to be rejected")
+	}
+	if code != 400 {
+		t.Fatalf("expected legacy call args to fail with 400, got=%d", code)
+	}
+	if !strings.Contains(runErr.Error(), "args_template") {
+		t.Fatalf("expected args_template guidance, got=%v", runErr)
 	}
 }
 
@@ -160,7 +185,7 @@ func TestFlowCallNodeRemoteUsesExecCall(t *testing.T) {
 	n := node{
 		ID:   "n1",
 		Kind: "call",
-		Spec: json.RawMessage(`{"target":2,"method":"debug::echo","args":{"remote":true}}`),
+		Spec: json.RawMessage(`{"target":2,"method":"debug::echo","args_template":{"remote":true}}`),
 	}
 	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
 	if runErr != nil {

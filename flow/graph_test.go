@@ -53,6 +53,21 @@ func TestValidateGraphRejectsLegacyKind(t *testing.T) {
 	}
 }
 
+func TestValidateGraphRejectsLegacyCallArgs(t *testing.T) {
+	g := graph{
+		Nodes: []node{
+			{ID: "A", Kind: "call", Spec: []byte(`{"method":"debug::echo","args":{"legacy":true}}`)},
+		},
+	}
+	err := validateGraph(g)
+	if err == nil {
+		t.Fatalf("expected err, got nil")
+	}
+	if !strings.Contains(err.Error(), "args_template") {
+		t.Fatalf("unexpected err=%v", err)
+	}
+}
+
 func TestValidateGraphRejectsNegativeRetryBackoff(t *testing.T) {
 	backoff := -1
 	g := graph{

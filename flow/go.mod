@@ -8,3 +8,5 @@ require (
 	github.com/yttydcs/myflowhub-subproto/broker v0.1.1
 	github.com/yttydcs/myflowhub-subproto/exec v0.1.2
 )
+
+replace github.com/yttydcs/myflowhub-proto => ../../proto-graph-contract-closure
