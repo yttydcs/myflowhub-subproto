@@ -36,6 +36,26 @@ func TestValidateTrigger(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "cron requires expression",
+			input:   trigger{Type: "cron"},
+			wantErr: true,
+		},
+		{
+			name:    "cron ok",
+			input:   trigger{Type: "cron", Cron: "0 9 * * 1-5"},
+			wantErr: false,
+		},
+		{
+			name:    "cron invalid",
+			input:   trigger{Type: "cron", Cron: "bad expr"},
+			wantErr: true,
+		},
+		{
+			name:    "cron dedup unsupported",
+			input:   trigger{Type: "cron", Cron: "0 9 * * 1-5", DedupWindowMs: intPtr(100)},
+			wantErr: true,
+		},
+		{
 			name:    "event requires name or topic",
 			input:   trigger{Type: "event"},
 			wantErr: true,
@@ -92,6 +112,19 @@ func TestValidateTrigger(t *testing.T) {
 				t.Fatalf("expected nil error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestCronScheduleNextAfter(t *testing.T) {
+	schedule, err := parseCronExpr("15 9 * * 1-5")
+	if err != nil {
+		t.Fatalf("parse err=%v", err)
+	}
+	start := time.Date(2026, 4, 3, 9, 14, 30, 0, time.Local)
+	next := schedule.NextAfter(start)
+	want := time.Date(2026, 4, 3, 9, 15, 0, 0, time.Local)
+	if !next.Equal(want) {
+		t.Fatalf("unexpected next cron time want=%v got=%v", want, next)
 	}
 }
 

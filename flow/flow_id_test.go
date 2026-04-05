@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/yttydcs/myflowhub-core/header"
@@ -301,7 +300,7 @@ func TestLoadFlowsFromDiskSkipsInvalidFlowID(t *testing.T) {
 	}
 }
 
-func TestLoadFlowsFromDiskKeepsLegacyKindsForCompatibility(t *testing.T) {
+func TestLoadFlowsFromDiskSkipsLegacyKinds(t *testing.T) {
 	h := NewHandler(nil)
 	h.baseDir = t.TempDir()
 	flowID := "123e4567-e89b-12d3-a456-426614174000"
@@ -327,14 +326,8 @@ func TestLoadFlowsFromDiskKeepsLegacyKindsForCompatibility(t *testing.T) {
 
 	h.loadFlowsFromDisk()
 
-	h.mu.Lock()
-	loaded, ok := h.flows[flowID]
-	h.mu.Unlock()
-	if !ok {
-		t.Fatalf("expected legacy flow to be loaded for runtime compatibility")
-	}
-	if !strings.EqualFold(loaded.Graph.Nodes[0].Kind, "local") {
-		t.Fatalf("expected legacy node kind preserved, got=%q", loaded.Graph.Nodes[0].Kind)
+	if len(h.flows) != 0 {
+		t.Fatalf("expected legacy flow to be skipped, got=%d", len(h.flows))
 	}
 }
 

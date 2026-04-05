@@ -87,7 +87,7 @@ func TestFlowCallNodeMethodTakesPrecedenceOverCapabilityRegistry(t *testing.T) {
 	}
 }
 
-func TestFlowLegacyLocalNodeStillSupportedAtRuntime(t *testing.T) {
+func TestFlowLegacyLocalNodeRejectedAtRuntime(t *testing.T) {
 	cfg := coreconfig.NewMap(map[string]string{})
 	h := NewHandlerWithConfig(cfg, nil)
 	srv := &testServer{nodeID: 1, cm: connmgr.New()}
@@ -100,11 +100,11 @@ func TestFlowLegacyLocalNodeStillSupportedAtRuntime(t *testing.T) {
 	}
 
 	code, _, runErr := h.executeNode(ctx, setReq{}, nil, n)
-	if runErr != nil {
-		t.Fatalf("execute legacy local err=%v", runErr)
+	if runErr == nil {
+		t.Fatal("expected legacy local node to be rejected")
 	}
-	if code != 1 {
-		t.Fatalf("execute legacy local code=%d", code)
+	if code != 400 {
+		t.Fatalf("expected legacy local node to fail with 400, got=%d", code)
 	}
 }
 

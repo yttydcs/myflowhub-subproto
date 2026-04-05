@@ -48,7 +48,7 @@ func TestValidateGraphRejectsLegacyKind(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected err, got nil")
 	}
-	if !strings.Contains(err.Error(), "kind must be call, compose or set_var") {
+	if !strings.Contains(err.Error(), "kind must be call, compose, transform, set_var, branch, foreach or subflow") {
 		t.Fatalf("unexpected err=%v", err)
 	}
 }
