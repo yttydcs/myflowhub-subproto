@@ -24,6 +24,8 @@
 ## Current Docs
 
 - 最新归档：
+  - [2026-04-05_flow-v0.1.5.md](2026-04-05_flow-v0.1.5.md)
+  - `flow` canonical contract runtime 正式发布为 `flow/v0.1.5`，并移除提交态 proto `replace`。
   - [2026-04-02_flow-run-archive-backend-runtime.md](2026-04-02_flow-run-archive-backend-runtime.md)
   - run archive backend：将 retained archive 抽象为独立 store，默认继续支持 file，`Server` 可选注入 PG。
   - [2026-04-02_flow-run-archive-runtime.md](2026-04-02_flow-run-archive-runtime.md)

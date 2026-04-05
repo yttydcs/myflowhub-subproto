@@ -1,9 +1,7 @@
-github.com/yttydcs/myflowhub-core v0.4.0 h1:DEeoS7ED9r+booyIyA3pZm4vWCR0KTwDzboXw3P/qcM=
-github.com/yttydcs/myflowhub-core v0.4.0/go.mod h1:v63nBnLGfsVLtrbnM9jeiTL+s5nWeCOJ9BWeoWtfwc8=
 github.com/yttydcs/myflowhub-core v0.4.10 h1:3tXi8SBo7YBQLWWhdKrcI7LwgLoX3CIKbCEA1/RWMWc=
 github.com/yttydcs/myflowhub-core v0.4.10/go.mod h1:/XfiiRJgVlnEe9Eo2ug0yn4l9x7k3+wq+3GJXZkJzUU=
-github.com/yttydcs/myflowhub-proto v0.1.6 h1:S+UU6MFSwNRyONSa9JECQwBBWQFx+ZIEkvG2OB/bFPc=
-github.com/yttydcs/myflowhub-proto v0.1.6/go.mod h1:1shJnnAYNZYd1KnGNtvgdygTaeCyx5duMnxrRLRouOc=
+github.com/yttydcs/myflowhub-proto v0.1.7 h1:EjFbNgR6djGIOYxaGV0j6EOKFu9sme/OlbLiTLtE9gI=
+github.com/yttydcs/myflowhub-proto v0.1.7/go.mod h1:1shJnnAYNZYd1KnGNtvgdygTaeCyx5duMnxrRLRouOc=
 github.com/yttydcs/myflowhub-subproto/broker v0.1.1 h1:9nG17R//KpTICK/IcnuMNww88uzsILuhcLl3WXUhRow=
 github.com/yttydcs/myflowhub-subproto/broker v0.1.1/go.mod h1:ZN/xyR7HTixZRC2QeiRjqg69TCkxk+Cyr1+WKTFjnPs=
 github.com/yttydcs/myflowhub-subproto/exec v0.1.2 h1:6fE2q/2nGu6dQ3/wHkTFgTcb/6HMUJABX3bbA/y+6+k=
