@@ -26,7 +26,7 @@ func TestFlowRegistersCapabilityRun(t *testing.T) {
 				{
 					ID:   "n1",
 					Kind: "call",
-					Spec: json.RawMessage(`{"method":"debug::echo","args":{"hello":"world"}}`),
+					Spec: json.RawMessage(`{"method":"debug::echo","args_template":{"hello":"world"}}`),
 				},
 			},
 		},
@@ -126,7 +126,7 @@ func TestFlowCapabilityRunPreservesServerContext(t *testing.T) {
 				{
 					ID:   "n1",
 					Kind: "call",
-					Spec: json.RawMessage(fmt.Sprintf(`{"method":"%s","args":{"hello":"world"}}`, method)),
+					Spec: json.RawMessage(fmt.Sprintf(`{"method":"%s","args_template":{"hello":"world"}}`, method)),
 				},
 			},
 		},

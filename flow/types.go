@@ -59,3 +59,48 @@ type flowSummary = protocol.FlowSummary
 type listResp = protocol.ListResp
 type getReq = protocol.GetReq
 type getResp = protocol.GetResp
+type nodeKind = protocol.NodeKind
+type bindingSourceKind = protocol.BindingSourceKind
+type branchMatchOp = protocol.BranchMatchOp
+type inputBinding = protocol.InputBinding
+type bindingSource = protocol.BindingSource
+type callSpec = protocol.CallSpec
+type composeSpec = protocol.ComposeSpec
+type setVarSpec = protocol.SetVarSpec
+type transformExpr = protocol.TransformExpr
+type transformSpec = protocol.TransformSpec
+type branchMatch = protocol.BranchMatch
+type branchCase = protocol.BranchCase
+type branchSpec = protocol.BranchSpec
+type foreachSpec = protocol.ForeachSpec
+type subflowSpec = protocol.SubflowSpec
+
+const (
+	nodeKindCall      = protocol.NodeKindCall
+	nodeKindCompose   = protocol.NodeKindCompose
+	nodeKindTransform = protocol.NodeKindTransform
+	nodeKindSetVar    = protocol.NodeKindSetVar
+	nodeKindBranch    = protocol.NodeKindBranch
+	nodeKindForeach   = protocol.NodeKindForeach
+	nodeKindSubflow   = protocol.NodeKindSubflow
+)
+
+const (
+	bindingSourceNodeResult = protocol.BindingSourceNodeResult
+	bindingSourceTrigger    = protocol.BindingSourceTrigger
+	bindingSourceFlowMeta   = protocol.BindingSourceFlowMeta
+	bindingSourceRunMeta    = protocol.BindingSourceRunMeta
+	bindingSourceLoopItem   = protocol.BindingSourceLoopItem
+	bindingSourceLoopIndex  = protocol.BindingSourceLoopIndex
+	bindingSourceFlowVar    = protocol.BindingSourceFlowVar
+)
+
+const (
+	branchMatchEq     = protocol.BranchMatchEq
+	branchMatchNe     = protocol.BranchMatchNe
+	branchMatchGt     = protocol.BranchMatchGt
+	branchMatchGte    = protocol.BranchMatchGte
+	branchMatchLt     = protocol.BranchMatchLt
+	branchMatchLte    = protocol.BranchMatchLte
+	branchMatchExists = protocol.BranchMatchExists
+)
