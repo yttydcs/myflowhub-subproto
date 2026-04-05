@@ -9,4 +9,4 @@ require (
 	github.com/yttydcs/myflowhub-subproto/exec v0.1.2
 )
 
-replace github.com/yttydcs/myflowhub-proto => ../../proto-graph-contract-closure
+replace github.com/yttydcs/myflowhub-proto => ../../MyFlowHub-Proto
