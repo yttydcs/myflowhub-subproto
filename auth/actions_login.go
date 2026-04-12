@@ -99,6 +99,7 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		if isSameConnectionNode(conn, rec.NodeID) {
 			applyDisplayNameMeta(conn, req.DisplayName)
 		}
+		role, perms, _ := h.lookupByNode(rec.NodeID)
 		h.addRouteIndex(ctx, rec.NodeID, conn)
 		h.sendAssistResp(ctx, conn, hdr, actionAssistLoginResp, respData{
 			Code:        1,
@@ -106,6 +107,8 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 			DeviceID:    req.DeviceID,
 			NodeID:      rec.NodeID,
 			HubID:       localNodeID(ctx),
+			Role:        role,
+			Perms:       perms,
 			PubKey:      base64.StdEncoding.EncodeToString(rec.PubKey),
 			NodePub:     base64.StdEncoding.EncodeToString(rec.PubKey),
 			DisplayName: req.DisplayName,
@@ -140,12 +143,15 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 			h.saveBinding(ctx, conn, req.DeviceID, rec.NodeID, rec.PubKey)
 			h.applyHubID(ctx, conn, localNodeID(ctx))
 			applyDisplayNameMeta(conn, req.DisplayName)
+			role, perms, _ := h.lookupByNode(rec.NodeID)
 			send(ctx, conn, hdr, actionLoginResp, respData{
 				Code:        1,
 				Msg:         "ok",
 				DeviceID:    req.DeviceID,
 				NodeID:      rec.NodeID,
 				HubID:       localNodeID(ctx),
+				Role:        role,
+				Perms:       perms,
 				PubKey:      base64.StdEncoding.EncodeToString(rec.PubKey),
 				NodePub:     base64.StdEncoding.EncodeToString(rec.PubKey),
 				DisplayName: req.DisplayName,
