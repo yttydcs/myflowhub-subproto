@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around transport.
+
 import (
 	"context"
 	"crypto/ecdsa"

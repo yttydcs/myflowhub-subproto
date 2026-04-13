@@ -1,5 +1,7 @@
 package forward
 
+// Context: This file belongs to the SubProto implementation layer around forward.
+
 import (
 	"context"
 	"log/slog"

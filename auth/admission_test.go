@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around admission_test.
+
 import (
 	"context"
 	"encoding/json"

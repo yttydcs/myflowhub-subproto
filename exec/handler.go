@@ -1,5 +1,7 @@
 package exec
 
+// Context: This file belongs to the SubProto implementation layer around handler.
+
 import (
 	"context"
 	"encoding/json"

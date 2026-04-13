@@ -1,5 +1,7 @@
 package exec
 
+// Context: This file belongs to the SubProto implementation layer around capability_permission_test.
+
 import (
 	"context"
 	"encoding/json"

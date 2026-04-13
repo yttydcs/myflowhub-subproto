@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around management.
+
 import (
 	"context"
 	"encoding/json"

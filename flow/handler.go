@@ -1,5 +1,7 @@
 package flow
 
+// Context: This file belongs to the SubProto implementation layer around handler.
+
 import (
 	"bytes"
 	"context"

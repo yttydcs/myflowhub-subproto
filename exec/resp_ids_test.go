@@ -1,5 +1,7 @@
 package exec
 
+// Context: This file belongs to the SubProto implementation layer around resp_ids_test.
+
 import (
 	"context"
 	"encoding/json"

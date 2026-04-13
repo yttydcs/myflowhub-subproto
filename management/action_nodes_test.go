@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around action_nodes_test.
+
 import (
 	"context"
 	"io"

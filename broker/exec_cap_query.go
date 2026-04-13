@@ -1,5 +1,7 @@
 package broker
 
+// Context: This file belongs to the SubProto implementation layer around exec_cap_query.
+
 import (
 	"sync"
 

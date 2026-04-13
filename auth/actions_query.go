@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around actions_query.
+
 import (
 	"context"
 	"encoding/json"

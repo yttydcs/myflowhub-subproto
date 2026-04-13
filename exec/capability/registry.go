@@ -1,5 +1,7 @@
 package capability
 
+// Context: This file belongs to the SubProto implementation layer around registry.
+
 import (
 	"context"
 	"encoding/json"

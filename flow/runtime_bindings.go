@@ -1,5 +1,7 @@
 package flow
 
+// Context: This file belongs to the SubProto implementation layer around runtime_bindings.
+
 import (
 	"bytes"
 	"encoding/json"

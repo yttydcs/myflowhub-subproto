@@ -1,5 +1,7 @@
 package flow
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/flow"
 
 // 子协议：flow（DAG 工作流调度）。

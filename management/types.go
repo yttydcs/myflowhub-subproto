@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/management"
 
 const SubProtoManagement uint8 = protocol.SubProtoManagement

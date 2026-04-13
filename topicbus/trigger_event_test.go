@@ -1,5 +1,7 @@
 package topicbus
 
+// Context: This file belongs to the SubProto implementation layer around trigger_event_test.
+
 import (
 	"context"
 	"encoding/json"

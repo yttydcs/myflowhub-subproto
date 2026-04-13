@@ -1,5 +1,7 @@
 package file
 
+// Context: This file belongs to the SubProto implementation layer around sessions.
+
 import (
 	"os"
 	"sync"

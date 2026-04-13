@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around util.
+
 import (
 	"errors"
 	"strconv"

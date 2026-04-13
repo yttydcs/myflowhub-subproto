@@ -1,5 +1,7 @@
 package topicbus
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/topicbus"
 
 // 子协议：Topic 订阅/发布。

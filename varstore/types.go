@@ -1,5 +1,7 @@
 package varstore
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/varstore"
 
 const (

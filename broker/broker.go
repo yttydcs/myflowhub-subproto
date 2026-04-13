@@ -1,5 +1,7 @@
 package broker
 
+// Context: This file belongs to the SubProto implementation layer around broker.
+
 import (
 	"strings"
 	"sync"

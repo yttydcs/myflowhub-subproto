@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around action_node_info.
+
 import (
 	"context"
 	"encoding/json"

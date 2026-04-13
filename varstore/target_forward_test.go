@@ -1,5 +1,7 @@
 package varstore
 
+// Context: This file belongs to the SubProto implementation layer around target_forward_test.
+
 import (
 	"context"
 	"encoding/json"

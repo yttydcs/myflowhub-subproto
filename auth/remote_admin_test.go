@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around remote_admin_test.
+
 import (
 	"context"
 	"encoding/json"

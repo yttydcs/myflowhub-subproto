@@ -1,5 +1,7 @@
 package file
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/file"
 
 // 子协议：file（节点间文件传输）。

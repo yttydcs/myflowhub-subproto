@@ -1,5 +1,7 @@
 package file
 
+// Context: This file belongs to the SubProto implementation layer around handler_list_test.
+
 import (
 	"context"
 	"io"

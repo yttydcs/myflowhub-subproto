@@ -1,5 +1,7 @@
 package flow
 
+// Context: This file belongs to the SubProto implementation layer around trigger_test.
+
 import (
 	"context"
 	"encoding/json"

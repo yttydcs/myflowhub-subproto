@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around management_response_path_test.
+
 import (
 	"context"
 	"encoding/json"

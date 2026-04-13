@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around actions_up_login.
+
 import (
 	"context"
 	"encoding/json"

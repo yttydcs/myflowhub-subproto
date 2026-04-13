@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around test_helpers_test.
+
 import (
 	"context"
 	"encoding/json"

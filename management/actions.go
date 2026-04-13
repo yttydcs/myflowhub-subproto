@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around actions.
+
 import core "github.com/yttydcs/myflowhub-core"
 
 func registerActions(h *ManagementHandler) []core.SubProcessAction {

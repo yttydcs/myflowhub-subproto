@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around auth_forward.
+
 import (
 	"context"
 	"encoding/json"

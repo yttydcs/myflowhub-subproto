@@ -1,5 +1,7 @@
 package flow
 
+// Context: This file belongs to the SubProto implementation layer around run_archive_store_test.
+
 import (
 	"context"
 	"errors"

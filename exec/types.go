@@ -1,5 +1,7 @@
 package exec
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/exec"
 
 // 子协议：exec（网络特殊能力调用）。

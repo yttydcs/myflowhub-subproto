@@ -1,5 +1,7 @@
 package stream
 
+// Context: This file belongs to the SubProto implementation layer around handler_test.
+
 import (
 	"context"
 	"encoding/json"

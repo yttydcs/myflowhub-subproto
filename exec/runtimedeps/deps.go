@@ -1,5 +1,7 @@
 package runtimedeps
 
+// Context: This file belongs to the SubProto implementation layer around deps.
+
 import (
 	core "github.com/yttydcs/myflowhub-core"
 	permission "github.com/yttydcs/myflowhub-core/kit/permission"

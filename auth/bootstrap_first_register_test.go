@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around bootstrap_first_register_test.
+
 import (
 	"context"
 	"encoding/json"

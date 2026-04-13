@@ -1,5 +1,7 @@
 package topicbus
 
+// Context: This file belongs to the SubProto implementation layer around actions.
+
 import (
 	core "github.com/yttydcs/myflowhub-core"
 	"github.com/yttydcs/myflowhub-core/subproto/kit"

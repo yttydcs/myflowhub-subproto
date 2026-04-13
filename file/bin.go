@@ -1,5 +1,7 @@
 package file
 
+// Context: This file belongs to the SubProto implementation layer around bin.
+
 import "encoding/binary"
 
 const binHeaderV1Size = 1 + 1 + 2 + 16 + 8

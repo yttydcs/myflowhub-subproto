@@ -1,5 +1,7 @@
 package management
 
+// Context: This file belongs to the SubProto implementation layer around deps_test.
+
 import (
 	"testing"
 

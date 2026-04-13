@@ -1,5 +1,7 @@
 package flow
 
+// Context: This file belongs to the SubProto implementation layer around flow_id_test.
+
 import (
 	"encoding/json"
 	"os"

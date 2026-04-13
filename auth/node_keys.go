@@ -1,5 +1,7 @@
 package auth
 
+// Context: This file belongs to the SubProto implementation layer around node_keys.
+
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"

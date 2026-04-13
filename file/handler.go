@@ -1,5 +1,7 @@
 package file
 
+// Context: This file belongs to the SubProto implementation layer around handler.
+
 import (
 	"context"
 	"crypto/sha256"

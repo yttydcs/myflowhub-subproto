@@ -1,5 +1,7 @@
 package stream
 
+// Context: This file belongs to the SubProto implementation layer around types.
+
 import protocol "github.com/yttydcs/myflowhub-proto/protocol/stream"
 
 const SubProtoStream uint8 = protocol.SubProtoStream

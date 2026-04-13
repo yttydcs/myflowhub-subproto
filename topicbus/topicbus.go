@@ -1,5 +1,7 @@
 package topicbus
 
+// Context: This file belongs to the SubProto implementation layer around topicbus.
+
 import (
 	"context"
 	"encoding/json"
