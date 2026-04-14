@@ -28,6 +28,8 @@
   - varstore authoritative cache gate：仅允许子树权威缓存直接回答 `get/list/subscribe`，并保留 `var_changed` 的沿途缓存更新。
   - [2026-04-05_flow-drop-legacy-compat.md](2026-04-05_flow-drop-legacy-compat.md)
   - flow 旧格式兼容下线：删除 `local/exec` 运行与落盘恢复兼容，主线改为严格拒绝旧节点。
+  - [2026-04-05_flow-v0.1.5.md](2026-04-05_flow-v0.1.5.md)
+  - `flow` canonical contract runtime 正式发布为 `flow/v0.1.5`，并移除提交态 proto `replace`。
   - [2026-04-03_flow-transform-node-runtime.md](2026-04-03_flow-transform-node-runtime.md)
   - `transform` 首版运行时：新增结构化表达式树纯计算节点，支持白名单运算、可选 source 缺失兜底和 `foreach` 内使用。
   - [2026-04-02_flow-run-archive-backend-runtime.md](2026-04-02_flow-run-archive-backend-runtime.md)
