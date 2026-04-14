@@ -28,3 +28,5 @@
   - 线索：`flow set 成功但 varpool 不更新`、`invokeCapabilitySet`、`propagateChange`
 - [flow-trigger-run-missing-server-context.md](flow-trigger-run-missing-server-context.md)
   - 线索：`trigger flow 不推送但刷新可见`、`tryStartRunWithTrigger`、`core.ServerFromContext(ctx)`
+- [varstore-authoritative-cache-boundary.md](varstore-authoritative-cache-boundary.md)
+  - 线索：`var_changed 后 refresh 回旧值`、`ownerInSubtree`、`assist_get`
