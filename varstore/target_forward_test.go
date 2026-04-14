@@ -1,6 +1,6 @@
 package varstore
 
-// Context: This file belongs to the SubProto implementation layer around target_forward_test.
+// 本文件覆盖 SubProto 中 `varstore` 模块里与 `target_forward` 相关的行为。
 
 import (
 	"context"
@@ -413,6 +413,323 @@ func TestNotifySetForwardedAndCachedLocally(t *testing.T) {
 	}
 	if rec.Value != "1" || rec.Owner != 10 || !rec.IsPublic {
 		t.Fatalf("unexpected cached record: %+v", rec)
+	}
+}
+
+func TestVarChangedForwardedAndCachedLocally(t *testing.T) {
+	h := NewVarStoreHandlerWithConfig(nil, nil)
+	h.Init()
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(1))
+	_ = cm.Add(parent)
+
+	child := newTestConn("child")
+	child.SetMeta("nodeID", uint32(10))
+	_ = cm.Add(child)
+	cm.AddNodeIndex(10, child)
+
+	srv := newTestServer(2, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	payload := mustJSON(map[string]any{
+		"action": "var_changed",
+		"data": map[string]any{
+			"code":       1,
+			"name":       "dht11_gpio8_temperature_c",
+			"value":      "24",
+			"owner":      4,
+			"visibility": "public",
+			"type":       "int",
+		},
+	})
+	hdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(3).
+		WithSourceID(4).
+		WithTargetID(10)
+
+	h.OnReceive(ctx, parent, hdr, payload)
+
+	if len(child.sent) != 1 {
+		t.Fatalf("expected forwarded var_changed to child, got %d", len(child.sent))
+	}
+	if child.sent[0].hdr == nil {
+		t.Fatalf("expected forwarded header")
+	}
+	if child.sent[0].hdr.TargetID() != 10 {
+		t.Fatalf("forwarded target mismatch: got=%d want=10", child.sent[0].hdr.TargetID())
+	}
+	if child.sent[0].hdr.SourceID() != 4 {
+		t.Fatalf("forwarded source mismatch: got=%d want=4", child.sent[0].hdr.SourceID())
+	}
+
+	rec, ok := h.lookupOwned(4, "dht11_gpio8_temperature_c")
+	if !ok {
+		t.Fatalf("expected var_changed to update local cache")
+	}
+	if rec.Value != "24" || rec.Owner != 4 || !rec.IsPublic || rec.Type != "int" {
+		t.Fatalf("unexpected cached record: %+v", rec)
+	}
+}
+
+func TestGetNonSubtreeStaleCacheForwardsAssistGet(t *testing.T) {
+	h := NewVarStoreHandlerWithConfig(nil, nil)
+	h.Init()
+	h.saveRecord("dht11_gpio8_temperature_c", varRecord{
+		Owner:      4,
+		Value:      "23",
+		Visibility: "public",
+		Type:       "int",
+		IsPublic:   true,
+	})
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(1))
+	_ = cm.Add(parent)
+
+	src := newTestConn("src")
+	src.SetMeta("nodeID", uint32(10))
+	_ = cm.Add(src)
+
+	srv := newTestServer(2, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	payload := mustJSON(map[string]any{
+		"action": "get",
+		"data": map[string]any{
+			"name":  "dht11_gpio8_temperature_c",
+			"owner": 4,
+		},
+	})
+	hdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(3).
+		WithSourceID(10).
+		WithTargetID(2).
+		WithMsgID(101).
+		WithTraceID(1001)
+
+	h.OnReceive(ctx, src, hdr, payload)
+
+	if len(src.sent) != 0 {
+		t.Fatalf("expected no immediate local response, got %d", len(src.sent))
+	}
+	if len(parent.sent) != 1 {
+		t.Fatalf("expected assist_get forwarded to parent, got %d", len(parent.sent))
+	}
+	var msg struct {
+		Action string          `json:"action"`
+		Data   json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(parent.sent[0].payload, &msg); err != nil {
+		t.Fatalf("decode forwarded payload: %v", err)
+	}
+	if msg.Action != "assist_get" {
+		t.Fatalf("unexpected forwarded action: %s", msg.Action)
+	}
+	if parent.sent[0].hdr == nil || parent.sent[0].hdr.SourceID() != 10 {
+		t.Fatalf("unexpected forwarded header: %+v", parent.sent[0].hdr)
+	}
+}
+
+func TestGetSubtreeCacheStillRepliesLocally(t *testing.T) {
+	h := NewVarStoreHandlerWithConfig(nil, nil)
+	h.Init()
+	h.saveRecord("dht11_gpio8_temperature_c", varRecord{
+		Owner:      4,
+		Value:      "24",
+		Visibility: "public",
+		Type:       "int",
+		IsPublic:   true,
+	})
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(1))
+	_ = cm.Add(parent)
+
+	child := newTestConn("child")
+	child.SetMeta("nodeID", uint32(4))
+	_ = cm.Add(child)
+	cm.AddNodeIndex(4, child)
+
+	src := newTestConn("src")
+	src.SetMeta("nodeID", uint32(10))
+	_ = cm.Add(src)
+
+	srv := newTestServer(2, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	payload := mustJSON(map[string]any{
+		"action": "get",
+		"data": map[string]any{
+			"name":  "dht11_gpio8_temperature_c",
+			"owner": 4,
+		},
+	})
+	hdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(3).
+		WithSourceID(10).
+		WithTargetID(2).
+		WithMsgID(102)
+
+	h.OnReceive(ctx, src, hdr, payload)
+
+	if len(parent.sent) != 0 {
+		t.Fatalf("expected no upstream forward, got %d", len(parent.sent))
+	}
+	if len(src.sent) != 1 {
+		t.Fatalf("expected local get response, got %d", len(src.sent))
+	}
+	var msg struct {
+		Action string          `json:"action"`
+		Data   json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(src.sent[0].payload, &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.Action != "get_resp" {
+		t.Fatalf("unexpected response action: %s", msg.Action)
+	}
+	var resp struct {
+		Code  int    `json:"code"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		t.Fatalf("decode response data: %v", err)
+	}
+	if resp.Code != 1 || resp.Value != "24" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestListNonSubtreeStaleCacheForwardsAssistList(t *testing.T) {
+	h := NewVarStoreHandlerWithConfig(nil, nil)
+	h.Init()
+	h.saveRecord("dht11_gpio8_temperature_c", varRecord{
+		Owner:      4,
+		Value:      "23",
+		Visibility: "public",
+		Type:       "int",
+		IsPublic:   true,
+	})
+	h.saveRecord("dht11_gpio8_humidity_percent", varRecord{
+		Owner:      4,
+		Value:      "56",
+		Visibility: "public",
+		Type:       "int",
+		IsPublic:   true,
+	})
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(1))
+	_ = cm.Add(parent)
+
+	src := newTestConn("src")
+	src.SetMeta("nodeID", uint32(10))
+	_ = cm.Add(src)
+
+	srv := newTestServer(2, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	payload := mustJSON(map[string]any{
+		"action": "list",
+		"data": map[string]any{
+			"owner": 4,
+		},
+	})
+	hdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(3).
+		WithSourceID(10).
+		WithTargetID(2).
+		WithMsgID(201).
+		WithTraceID(2001)
+
+	h.OnReceive(ctx, src, hdr, payload)
+
+	if len(src.sent) != 0 {
+		t.Fatalf("expected no immediate local list response, got %d", len(src.sent))
+	}
+	if len(parent.sent) != 1 {
+		t.Fatalf("expected assist_list forwarded to parent, got %d", len(parent.sent))
+	}
+	var msg struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal(parent.sent[0].payload, &msg); err != nil {
+		t.Fatalf("decode forwarded payload: %v", err)
+	}
+	if msg.Action != "assist_list" {
+		t.Fatalf("unexpected forwarded action: %s", msg.Action)
+	}
+}
+
+func TestSubscribeNonSubtreeStaleCacheForwardsAssistSubscribe(t *testing.T) {
+	h := NewVarStoreHandlerWithConfig(nil, nil)
+	h.Init()
+	h.saveRecord("dht11_gpio8_temperature_c", varRecord{
+		Owner:      4,
+		Value:      "23",
+		Visibility: "public",
+		Type:       "int",
+		IsPublic:   true,
+	})
+
+	cm := connmgr.New()
+	parent := newTestConn("parent")
+	parent.SetMeta(core.MetaRoleKey, core.RoleParent)
+	parent.SetMeta("nodeID", uint32(1))
+	_ = cm.Add(parent)
+
+	src := newTestConn("src")
+	src.SetMeta("nodeID", uint32(10))
+	_ = cm.Add(src)
+
+	srv := newTestServer(2, cm)
+	ctx := core.WithServerContext(context.Background(), srv)
+
+	payload := mustJSON(map[string]any{
+		"action": "subscribe",
+		"data": map[string]any{
+			"name":       "dht11_gpio8_temperature_c",
+			"owner":      4,
+			"subscriber": 10,
+		},
+	})
+	hdr := (&header.HeaderTcp{}).
+		WithMajor(header.MajorCmd).
+		WithSubProto(3).
+		WithSourceID(10).
+		WithTargetID(2).
+		WithMsgID(301).
+		WithTraceID(3001)
+
+	h.OnReceive(ctx, src, hdr, payload)
+
+	if len(src.sent) != 0 {
+		t.Fatalf("expected no immediate local subscribe response, got %d", len(src.sent))
+	}
+	if len(parent.sent) != 1 {
+		t.Fatalf("expected assist_subscribe forwarded to parent, got %d", len(parent.sent))
+	}
+	var msg struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal(parent.sent[0].payload, &msg); err != nil {
+		t.Fatalf("decode forwarded payload: %v", err)
+	}
+	if msg.Action != "assist_subscribe" {
+		t.Fatalf("unexpected forwarded action: %s", msg.Action)
 	}
 }
 

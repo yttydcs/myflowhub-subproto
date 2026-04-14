@@ -1,6 +1,6 @@
 package varstore
 
-// Context: This file belongs to the SubProto implementation layer around varstore.
+// 本文件承载 SubProto 中 `varstore` 模块里与 `varstore` 相关的逻辑。
 
 import (
 	"context"
@@ -52,18 +52,22 @@ type HandlerOptions struct {
 	Persistence Persistence
 }
 
+// NewVarStoreHandler 创建 varstore handler，并使用默认依赖与内存持久化。
 func NewVarStoreHandler(log *slog.Logger) *VarStoreHandler {
 	return NewVarStoreHandlerWithOptions(nil, HandlerOptions{}, log)
 }
 
+// NewVarStoreHandlerWithConfig 允许通过配置初始化权限与持久化相关依赖。
 func NewVarStoreHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *VarStoreHandler {
 	return NewVarStoreHandlerWithOptions(cfg, HandlerOptions{}, log)
 }
 
+// NewVarStoreHandlerWithDeps 让外部可以替换 runtime 依赖，但保持默认行为不变。
 func NewVarStoreHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *VarStoreHandler {
 	return NewVarStoreHandlerWithOptions(cfg, HandlerOptions{RuntimeDeps: deps}, log)
 }
 
+// NewVarStoreHandlerWithOptions 是 varstore handler 的统一构造入口。
 func NewVarStoreHandlerWithOptions(cfg core.IConfig, opts HandlerOptions, log *slog.Logger) *VarStoreHandler {
 	if log == nil {
 		log = slog.Default()
@@ -231,6 +235,7 @@ var capabilityVarRevokeOutputSchema = json.RawMessage(`{
   }
 }`)
 
+// registerCapabilities 把常用的 set/get/revoke 以 exec capability 的形式对外暴露。
 func (h *VarStoreHandler) registerCapabilities() {
 	if h.capRegistry == nil {
 		return
@@ -264,6 +269,7 @@ func (h *VarStoreHandler) registerCapabilities() {
 	}, execcap.InvokeFunc(h.invokeCapabilityRevoke))
 }
 
+// invokeCapabilitySet 直接在本地记录上执行一次 set，并同步触发广播链路。
 func (h *VarStoreHandler) invokeCapabilitySet(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		Owner      uint32 `json:"owner"`
@@ -334,6 +340,7 @@ func (h *VarStoreHandler) invokeCapabilitySet(ctx context.Context, args json.Raw
 	return resp, nil
 }
 
+// invokeCapabilityGet 读取当前节点已知的本地变量值。
 func (h *VarStoreHandler) invokeCapabilityGet(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		Owner uint32 `json:"owner"`
@@ -361,6 +368,7 @@ func (h *VarStoreHandler) invokeCapabilityGet(_ context.Context, args json.RawMe
 	return resp, nil
 }
 
+// invokeCapabilityRevoke 删除本地变量记录，并沿通知链路传播删除事件。
 func (h *VarStoreHandler) invokeCapabilityRevoke(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		Owner uint32 `json:"owner"`
@@ -402,6 +410,7 @@ func (h *VarStoreHandler) invokeCapabilityRevoke(ctx context.Context, args json.
 var writeMsgSeq atomic.Uint32
 var writeMsgSeqInit sync.Once
 
+// nextWriteMsgID 为上送写请求生成不会轻易和正常消息冲突的 MsgID。
 func nextWriteMsgID() uint32 {
 	writeMsgSeqInit.Do(func() {
 		var seed [4]byte
@@ -424,6 +433,7 @@ func (h *VarStoreHandler) AcceptCmd() bool { return true }
 
 func (h *VarStoreHandler) SubProto() uint8 { return 3 }
 
+// Init 在注册期加载持久化变量，并挂载动作表。
 func (h *VarStoreHandler) Init() bool {
 	if err := h.loadPersistedRecords(context.Background()); err != nil {
 		h.log.Warn("varstore load persisted state failed", "err", err)
@@ -433,6 +443,7 @@ func (h *VarStoreHandler) Init() bool {
 	return true
 }
 
+// OnReceive 负责 varstore 帧解析、TargetID 转发判定和动作分派。
 func (h *VarStoreHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	h.ensureConnCloseSubscription(ctx)
 	h.maybeSweepWriting(time.Now())
@@ -443,7 +454,13 @@ func (h *VarStoreHandler) OnReceive(ctx context.Context, conn core.IConnection, 
 	}
 	if h.shouldForwardByHeaderTarget(ctx, hdr, msg.Action) {
 		forwarded, code, msgText := h.forwardCmdByHeaderTarget(ctx, conn, hdr, payload)
-		needsLocal := msg.Action == varActionNotifySet || msg.Action == varActionNotifyRevoke
+		// 订阅通知发往下游目标节点时，当前 hub 仍需同步更新自己的缓存；
+		// 否则 Win 会先收到 var_changed 新值，但后续 get/refresh 仍读到 hub 的旧缓存。
+		needsLocal :=
+			msg.Action == varActionNotifySet ||
+				msg.Action == varActionNotifyRevoke ||
+				msg.Action == varActionVarChanged ||
+				msg.Action == varActionVarDeleted
 		if forwarded && !needsLocal {
 			return
 		}
@@ -463,6 +480,7 @@ func (h *VarStoreHandler) OnReceive(ctx context.Context, conn core.IConnection, 
 }
 
 // set / assist_set
+// handleSet 在 owner 所在子树上执行写入，并在跨树时建立 pending write 等待回包。
 func (h *VarStoreHandler) handleSet(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
 	var req setReq
 	if err := json.Unmarshal(data, &req); err != nil || !validVarName(req.Name) || strings.TrimSpace(req.Value) == "" {
@@ -595,21 +613,23 @@ func (h *VarStoreHandler) handleGet(ctx context.Context, conn core.IConnection, 
 		return
 	}
 
-	if rec, ok := h.lookupOwned(owner, req.Name); ok {
-		if rec.IsPublic || owner == hdr.SourceID() || h.hasPermission(permission.SourceNodeID(hdr, conn), permission.VarPrivateSet) {
-			h.sendResp(ctx, conn, hdr, chooseGetResp(assisted), varResp{
-				Code:       1,
-				Msg:        "ok",
-				Name:       req.Name,
-				Value:      rec.Value,
-				Owner:      owner,
-				Visibility: rec.Visibility,
-				Type:       rec.Type,
-			})
+	if h.ownerInSubtree(ctx, owner) {
+		if rec, ok := h.lookupOwned(owner, req.Name); ok {
+			if rec.IsPublic || owner == hdr.SourceID() || h.hasPermission(permission.SourceNodeID(hdr, conn), permission.VarPrivateSet) {
+				h.sendResp(ctx, conn, hdr, chooseGetResp(assisted), varResp{
+					Code:       1,
+					Msg:        "ok",
+					Name:       req.Name,
+					Value:      rec.Value,
+					Owner:      owner,
+					Visibility: rec.Visibility,
+					Type:       rec.Type,
+				})
+				return
+			}
+			h.sendResp(ctx, conn, hdr, chooseGetResp(assisted), varResp{Code: 3, Msg: "forbidden"})
 			return
 		}
-		h.sendResp(ctx, conn, hdr, chooseGetResp(assisted), varResp{Code: 3, Msg: "forbidden"})
-		return
 	}
 
 	if parent := h.findParent(ctx); parent != nil {
@@ -640,13 +660,14 @@ func (h *VarStoreHandler) handleList(ctx context.Context, conn core.IConnection,
 
 	actorID := permission.SourceNodeID(hdr, conn)
 	includePrivate := actorID == owner || h.hasPermission(actorID, permission.VarPrivateSet)
+	parent := h.findParent(ctx)
 	names := h.listNames(owner, includePrivate)
-	if len(names) > 0 || srv.NodeID() == owner || h.findParent(ctx) == nil {
+	if h.ownerInSubtree(ctx, owner) && (len(names) > 0 || srv.NodeID() == owner || parent == nil) {
 		h.sendResp(ctx, conn, hdr, chooseListResp(assisted), varResp{Code: 1, Msg: "ok", Owner: owner, Names: names})
 		return
 	}
 
-	if parent := h.findParent(ctx); parent != nil {
+	if parent != nil {
 		h.addPending(owner, "", conn.ID(), pendingKindList, hdr)
 		h.forward(ctx, parent, varActionAssistList, req, actorID)
 		return
@@ -829,21 +850,23 @@ func (h *VarStoreHandler) handleSubscribe(ctx context.Context, conn core.IConnec
 		return
 	}
 
-	if rec, ok := h.lookupOwned(req.Owner, req.Name); ok {
-		if !rec.IsPublic && subscriber != req.Owner && !h.hasPermission(subscriber, permission.VarSubscribe) {
-			h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{Code: 3, Msg: "forbidden", Name: req.Name, Owner: req.Owner})
+	if h.ownerInSubtree(ctx, req.Owner) {
+		if rec, ok := h.lookupOwned(req.Owner, req.Name); ok {
+			if !rec.IsPublic && subscriber != req.Owner && !h.hasPermission(subscriber, permission.VarSubscribe) {
+				h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{Code: 3, Msg: "forbidden", Name: req.Name, Owner: req.Owner})
+				return
+			}
+			h.addSubscription(req.Owner, req.Name, subscriber, conn.ID())
+			h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{
+				Code:       1,
+				Msg:        "ok",
+				Name:       req.Name,
+				Owner:      req.Owner,
+				Visibility: rec.Visibility,
+				Type:       rec.Type,
+			})
 			return
 		}
-		h.addSubscription(req.Owner, req.Name, subscriber, conn.ID())
-		h.sendResp(ctx, conn, hdr, chooseSubscribeResp(assisted), varResp{
-			Code:       1,
-			Msg:        "ok",
-			Name:       req.Name,
-			Owner:      req.Owner,
-			Visibility: rec.Visibility,
-			Type:       rec.Type,
-		})
-		return
 	}
 
 	if parent := h.findParent(ctx); parent != nil {
