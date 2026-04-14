@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around admission_test.
+// 本文件覆盖 SubProto 中 `auth` 模块里与 `admission` 相关的行为。
 
 import (
 	"context"

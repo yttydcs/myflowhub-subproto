@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around authority_policy.
+// 本文件承载 SubProto 中 `auth` 模块里与 `authority_policy` 相关的逻辑。
 
 import (
 	"context"
@@ -31,6 +31,7 @@ type runtimeAuthorityPolicy struct {
 	expiresAt            time.Time
 }
 
+// loadAuthorityPolicyConfig 从配置读取半中心 authority 模式和 TTL。
 func (h *LoginHandler) loadAuthorityPolicyConfig(cfg core.IConfig) {
 	if h == nil {
 		return
@@ -50,6 +51,7 @@ func (h *LoginHandler) loadAuthorityPolicyConfig(cfg core.IConfig) {
 	}
 }
 
+// normalizeAuthorityMode 收敛配置别名，避免多种写法导致运行期分支漂移。
 func normalizeAuthorityMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "semi-central", "semi_central", "semi":
@@ -59,6 +61,7 @@ func normalizeAuthorityMode(raw string) string {
 	}
 }
 
+// clampAuthorityPolicyTTL 为运行期 lease 施加上下界，避免配置把广播频率推向极端。
 func clampAuthorityPolicyTTL(ttl time.Duration) time.Duration {
 	if ttl <= 0 {
 		return defaultAuthorityPolicyTTL
@@ -72,10 +75,12 @@ func clampAuthorityPolicyTTL(ttl time.Duration) time.Duration {
 	return ttl
 }
 
+// isSemiCentralMode 表示 authority 选择依赖运行期下发的 policy，而不是静态节点号。
 func (h *LoginHandler) isSemiCentralMode() bool {
 	return h != nil && h.authorityMode == authorityModeConfigSemiCentral
 }
 
+// authorityPolicyRefreshInterval 让本地广播频率始终快于 lease 过期。
 func (h *LoginHandler) authorityPolicyRefreshInterval() time.Duration {
 	ttl := clampAuthorityPolicyTTL(h.authorityPolicyTTL)
 	interval := ttl / 2
@@ -85,6 +90,7 @@ func (h *LoginHandler) authorityPolicyRefreshInterval() time.Duration {
 	return interval
 }
 
+// currentRuntimeAuthorityPolicy 读取当前仍未过期的 authority 选择结果。
 func (h *LoginHandler) currentRuntimeAuthorityPolicy(now time.Time) (runtimeAuthorityPolicy, bool) {
 	if h == nil {
 		return runtimeAuthorityPolicy{}, false
@@ -101,6 +107,7 @@ func (h *LoginHandler) currentRuntimeAuthorityPolicy(now time.Time) (runtimeAuth
 	return policy, true
 }
 
+// applyRuntimeAuthorityPolicy 只接受更“新”的 epoch，避免旧 policy 回滚 authority 选择。
 func (h *LoginHandler) applyRuntimeAuthorityPolicy(now time.Time, data authorityPolicySyncData) bool {
 	if h == nil {
 		return false
@@ -140,6 +147,7 @@ func (h *LoginHandler) applyRuntimeAuthorityPolicy(now time.Time, data authority
 	return true
 }
 
+// nextLocalAuthorityPolicy 生成本节点作为 authority 时对外广播的下一份 policy。
 func (h *LoginHandler) nextLocalAuthorityPolicy(localNodeID uint32) authorityPolicySyncData {
 	ttl := clampAuthorityPolicyTTL(h.authorityPolicyTTL)
 	epoch := h.authorityPolicyEpoch.Add(1)
@@ -151,6 +159,7 @@ func (h *LoginHandler) nextLocalAuthorityPolicy(localNodeID uint32) authorityPol
 	}
 }
 
+// broadcastLocalAuthorityPolicy 把当前节点声明成 authority，并先同步到本地 runtime state。
 func (h *LoginHandler) broadcastLocalAuthorityPolicy(ctx context.Context) {
 	if h == nil {
 		return
@@ -164,6 +173,7 @@ func (h *LoginHandler) broadcastLocalAuthorityPolicy(ctx context.Context) {
 	h.broadcastAuthorityPolicy(ctx, nil, policy)
 }
 
+// broadcastAuthorityPolicy 向所有非父连接广播 authority policy，同步下游选择。
 func (h *LoginHandler) broadcastAuthorityPolicy(ctx context.Context, src core.IConnection, policy authorityPolicySyncData) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {

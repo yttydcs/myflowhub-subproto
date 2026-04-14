@@ -1,6 +1,6 @@
 package flow
 
-// Context: This file belongs to the SubProto implementation layer around flow_id_test.
+// 本文件覆盖 SubProto 中 `flow` 模块里与 `flow_id` 相关的行为。
 
 import (
 	"encoding/json"

@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around routing.
+// 本文件承载 SubProto 中 `auth` 模块里与 `routing` 相关的逻辑。
 
 import (
 	"context"
@@ -27,6 +27,7 @@ type authoritySelection struct {
 	targetNodeID uint32
 }
 
+// localNodeID 从 server context 里取当前节点号，缺失时返回 0。
 func localNodeID(ctx context.Context) uint32 {
 	if srv := core.ServerFromContext(ctx); srv != nil {
 		return srv.NodeID()
@@ -34,6 +35,7 @@ func localNodeID(ctx context.Context) uint32 {
 	return 0
 }
 
+// resolveAuthority 汇总静态 authority、父连接和半中心 policy，得出当前应联系的 authority。
 func (h *LoginHandler) resolveAuthority(ctx context.Context) authoritySelection {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -58,6 +60,7 @@ func (h *LoginHandler) resolveAuthority(ctx context.Context) authoritySelection 
 	return authoritySelection{mode: authorityModeLocal}
 }
 
+// resolveSemiCentralAuthority 优先使用运行时 policy 指定的 authority，再退化到父链。
 func (h *LoginHandler) resolveSemiCentralAuthority(ctx context.Context, srv core.IServer) authoritySelection {
 	if h == nil || srv == nil {
 		return authoritySelection{mode: authorityModeUnavailable}
@@ -86,6 +89,7 @@ func (h *LoginHandler) resolveSemiCentralAuthority(ctx context.Context, srv core
 	return authoritySelection{mode: authorityModeLocal}
 }
 
+// explicitAuthorityNodeID 缓存静态 authority.node_id，避免每次解析配置。
 func (h *LoginHandler) explicitAuthorityNodeID(cfg core.IConfig) uint32 {
 	if h == nil {
 		return 0
@@ -105,6 +109,7 @@ func (h *LoginHandler) explicitAuthorityNodeID(cfg core.IConfig) uint32 {
 	return 0
 }
 
+// parentConfigured 判断当前节点是否理论上应该存在上游 authority。
 func (h *LoginHandler) parentConfigured(cfg core.IConfig) bool {
 	if cfg == nil {
 		return false
@@ -125,18 +130,22 @@ func (h *LoginHandler) parentConfigured(cfg core.IConfig) bool {
 	}
 }
 
+// local 表示 authority 就是当前节点。
 func (s authoritySelection) local() bool {
 	return s.mode == authorityModeLocal
 }
 
+// remote 表示 authority 在远端，且当前已经拿到可发送的连接。
 func (s authoritySelection) remote() bool {
 	return s.mode == authorityModeRemote && s.conn != nil
 }
 
+// unavailable 表示理论上应该有 authority，但当前没有可用路由。
 func (s authoritySelection) unavailable() bool {
 	return s.mode == authorityModeUnavailable
 }
 
+// authorityUnavailableResp 统一生成 authority 不可达时的用户可见响应。
 func authorityUnavailableResp(deviceID string) respData {
 	return respData{
 		Code:     4500,
@@ -146,6 +155,7 @@ func authorityUnavailableResp(deviceID string) respData {
 	}
 }
 
+// selectAuthorityConn 当前仅选择父连接，作为上送 authority 请求的下一跳。
 func (h *LoginHandler) selectAuthorityConn(ctx context.Context) core.IConnection {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -157,6 +167,7 @@ func (h *LoginHandler) selectAuthorityConn(ctx context.Context) core.IConnection
 	return nil
 }
 
+// findParentConnLogin 在连接表中查找被标记为 parent 的连接。
 func findParentConnLogin(cm core.IConnectionManager) (core.IConnection, bool) {
 	if cm == nil {
 		return nil, false
@@ -172,6 +183,7 @@ func findParentConnLogin(cm core.IConnectionManager) (core.IConnection, bool) {
 	return parent, parent != nil
 }
 
+// isParentConnLogin 用连接元数据判断该连接是否代表父节点。
 func isParentConnLogin(c core.IConnection) bool {
 	if c == nil {
 		return false
@@ -184,6 +196,7 @@ func isParentConnLogin(c core.IConnection) bool {
 	return false
 }
 
+// broadcast 向所有连接广播 auth 事件，通常用于 revoke/offline 等状态扩散。
 func (h *LoginHandler) broadcast(ctx context.Context, src core.IConnection, action string, data any) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -207,6 +220,7 @@ func (h *LoginHandler) broadcast(ctx context.Context, src core.IConnection, acti
 	})
 }
 
+// filterRolePerms 负责角色清单的过滤、分页和总数计算。
 func filterRolePerms(entries []rolePermEntry, req listRolesReq) ([]rolePermEntry, int) {
 	roleFilter := strings.TrimSpace(req.Role)
 	nodeFilter := make(map[uint32]bool)

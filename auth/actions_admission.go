@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around actions_admission.
+// 本文件承载 SubProto 中 `auth` 模块里与 `actions_admission` 相关的逻辑。
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
 )
 
+// registerAdmissionActions 注册 authority 管理面的审批与 permit 动作。
 func registerAdmissionActions(h *LoginHandler) []core.SubProcessAction {
 	return []core.SubProcessAction{
 		kit.NewAction(actionListPendingRegisters, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
@@ -35,6 +36,7 @@ func registerAdmissionActions(h *LoginHandler) []core.SubProcessAction {
 	}
 }
 
+// requireActionPermission 提取真实操作者节点并校验单个管理权限。
 func (h *LoginHandler) requireActionPermission(conn core.IConnection, hdr core.IHeader, perm string) (uint32, bool) {
 	actorID := permission.SourceNodeID(hdr, conn)
 	if actorID == 0 {
@@ -43,6 +45,7 @@ func (h *LoginHandler) requireActionPermission(conn core.IConnection, hdr core.I
 	return actorID, h.hasPermission(actorID, perm)
 }
 
+// requireAnyActionPermission 用于多个等价权限点共享同一入口的场景。
 func (h *LoginHandler) requireAnyActionPermission(conn core.IConnection, hdr core.IHeader, perms ...string) (uint32, bool) {
 	actorID := permission.SourceNodeID(hdr, conn)
 	if actorID == 0 {
@@ -59,6 +62,7 @@ func (h *LoginHandler) requireAnyActionPermission(conn core.IConnection, hdr cor
 	return actorID, false
 }
 
+// handleListPendingRegisters 返回当前 authority 侧尚未审批的注册请求。
 func (h *LoginHandler) handleListPendingRegisters(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req listPendingRegistersReq
 	if len(data) > 0 {
@@ -78,6 +82,7 @@ func (h *LoginHandler) handleListPendingRegisters(ctx context.Context, conn core
 	h.sendActionData(ctx, conn, hdr, actionListPendingRegistersResp, resp, true)
 }
 
+// handleListRegisterPermits 列出仍然有效的 register permit，并支持上游 authority 转发。
 func (h *LoginHandler) handleListRegisterPermits(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req listRegisterPermitsReq
 	if len(data) > 0 {
@@ -97,6 +102,7 @@ func (h *LoginHandler) handleListRegisterPermits(ctx context.Context, conn core.
 	h.sendActionData(ctx, conn, hdr, actionListRegisterPermitsResp, resp, true)
 }
 
+// handleApproveRegister 把 pending register 提升为 approved，等待设备最终完成 register。
 func (h *LoginHandler) handleApproveRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req approveRegisterReq
 	if err := json.Unmarshal(data, &req); err != nil || strings.TrimSpace(req.RequestID) == "" {
@@ -134,6 +140,7 @@ func (h *LoginHandler) handleApproveRegister(ctx context.Context, conn core.ICon
 	}, true)
 }
 
+// handleRejectRegister 关闭一个待审批注册请求，并把拒绝结果回给请求方。
 func (h *LoginHandler) handleRejectRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req rejectRegisterReq
 	if err := json.Unmarshal(data, &req); err != nil || strings.TrimSpace(req.RequestID) == "" {
@@ -166,6 +173,7 @@ func (h *LoginHandler) handleRejectRegister(ctx context.Context, conn core.IConn
 	}, true)
 }
 
+// handleIssueRegisterPermit 生成一次性 permit，供设备绕过人工审批直接 register。
 func (h *LoginHandler) handleIssueRegisterPermit(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req issueRegisterPermitReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -200,6 +208,7 @@ func (h *LoginHandler) handleIssueRegisterPermit(ctx context.Context, conn core.
 	}, true)
 }
 
+// handleRevokeRegisterPermit 撤销尚未消费的 permit，避免后续再次被设备使用。
 func (h *LoginHandler) handleRevokeRegisterPermit(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req revokeRegisterPermitReq
 	if err := json.Unmarshal(data, &req); err != nil || strings.TrimSpace(req.Permit) == "" {

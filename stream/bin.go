@@ -1,6 +1,6 @@
 package stream
 
-// Context: This file belongs to the SubProto implementation layer around bin.
+// 本文件承载 SubProto 中 `stream` 模块里与 `bin` 相关的逻辑。
 
 import "encoding/binary"
 

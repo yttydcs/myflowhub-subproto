@@ -1,6 +1,6 @@
 package stream
 
-// Context: This file belongs to the SubProto implementation layer around handler.
+// 本文件承载 SubProto 中 `stream` 模块里与 `handler` 相关的逻辑。
 
 import (
 	"bytes"
@@ -191,10 +191,12 @@ type Handler struct {
 	pendingCtrl map[string]chan privateCtrlResp
 }
 
+// NewHandler 提供零配置入口，适合默认模块集合直接装配 Stream 子协议。
 func NewHandler(log *slog.Logger) *Handler {
 	return NewHandlerWithConfig(nil, log)
 }
 
+// NewHandlerWithConfig 统一初始化 catalog、delivery 状态表和私有控制面等待队列。
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
@@ -216,6 +218,7 @@ func (h *Handler) SubProto() uint8 { return SubProtoStream }
 
 func (h *Handler) Init() bool { return true }
 
+// OnReceive 依据首字节把控制面、数据面和 ACK 面拆开，避免三类语义互相污染。
 func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if hdr == nil || len(payload) == 0 {
 		return
@@ -230,6 +233,7 @@ func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core
 	}
 }
 
+// handleCtrl 解析 stream 控制动作；私有 prepare/activate/close 回复优先投递给等待中的协调流程。
 func (h *Handler) handleCtrl(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if len(payload) < 2 {
 		return
@@ -382,6 +386,7 @@ func (h *Handler) handleCtrl(ctx context.Context, conn core.IConnection, hdr cor
 	}
 }
 
+// handleAnnounceRequest 把 source 声明路由到真正的 owner 节点，本地时再写入 source catalog。
 func (h *Handler) handleAnnounceRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req announceReq) {
 	requester := hdr.SourceID()
 	target := requester
@@ -398,6 +403,7 @@ func (h *Handler) handleAnnounceRequest(ctx context.Context, conn core.IConnecti
 	)
 }
 
+// handleWithdrawRequest 将 source 撤销交给 owner 节点处理，避免非 owner 篡改 catalog。
 func (h *Handler) handleWithdrawRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req withdrawReq) {
 	requester := hdr.SourceID()
 	h.routeOwnerRequest(ctx, conn, hdr, payload, requester, permPublish, requester,
@@ -410,6 +416,7 @@ func (h *Handler) handleWithdrawRequest(ctx context.Context, conn core.IConnecti
 	)
 }
 
+// handleListSourcesRequest 让 producer owner 返回可见 source 快照，保持查询与所有权一致。
 func (h *Handler) handleListSourcesRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req listSourcesReq) {
 	requester := hdr.SourceID()
 	h.routeOwnerRequest(ctx, conn, hdr, payload, requester, permSubscribe, req.Producer,
@@ -422,6 +429,7 @@ func (h *Handler) handleListSourcesRequest(ctx context.Context, conn core.IConne
 	)
 }
 
+// handleGetSourceRequest 把单个 source 查询落到 producer owner，避免跨节点直接读内部状态。
 func (h *Handler) handleGetSourceRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req getSourceReq) {
 	requester := hdr.SourceID()
 	h.routeOwnerRequest(ctx, conn, hdr, payload, requester, permSubscribe, req.Producer,
@@ -434,6 +442,7 @@ func (h *Handler) handleGetSourceRequest(ctx context.Context, conn core.IConnect
 	)
 }
 
+// handleAnnounceConsumerRequest 将 consumer endpoint 的声明路由到其 owner 节点登记。
 func (h *Handler) handleAnnounceConsumerRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req announceConsumerReq) {
 	requester := hdr.SourceID()
 	target := requester
@@ -450,6 +459,7 @@ func (h *Handler) handleAnnounceConsumerRequest(ctx context.Context, conn core.I
 	)
 }
 
+// handleWithdrawConsumerRequest 让 consumer owner 负责撤销 endpoint，并清理相关 delivery。
 func (h *Handler) handleWithdrawConsumerRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req withdrawConsumerReq) {
 	requester := hdr.SourceID()
 	h.routeOwnerRequest(ctx, conn, hdr, payload, requester, permConsume, requester,
@@ -462,6 +472,7 @@ func (h *Handler) handleWithdrawConsumerRequest(ctx context.Context, conn core.I
 	)
 }
 
+// handleListConsumersRequest 只从 consumer owner 读取 endpoint 列表，避免旁路读取。
 func (h *Handler) handleListConsumersRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req listConsumersReq) {
 	requester := hdr.SourceID()
 	h.routeOwnerRequest(ctx, conn, hdr, payload, requester, permConnect, req.Consumer,
@@ -474,6 +485,7 @@ func (h *Handler) handleListConsumersRequest(ctx context.Context, conn core.ICon
 	)
 }
 
+// handleGetConsumerRequest 把单 endpoint 查询交给 consumer owner，保持读写边界一致。
 func (h *Handler) handleGetConsumerRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req getConsumerReq) {
 	requester := hdr.SourceID()
 	h.routeOwnerRequest(ctx, conn, hdr, payload, requester, permConnect, req.Consumer,
@@ -486,6 +498,7 @@ func (h *Handler) handleGetConsumerRequest(ctx context.Context, conn core.IConne
 	)
 }
 
+// handleSubscribeRequest 在 requester 同时扮演 consumer 的常见场景下，请协调节点建立 delivery。
 func (h *Handler) handleSubscribeRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req subscribeReq) {
 	requester := hdr.SourceID()
 	h.routeCoordinatorRequest(ctx, conn, hdr, payload, requester, permSubscribe, req.Producer, requester,
@@ -498,6 +511,7 @@ func (h *Handler) handleSubscribeRequest(ctx context.Context, conn core.IConnect
 	)
 }
 
+// handleUnsubscribeRequest 按 deliveryID 寻址到真正持有路由/状态的节点后再执行拆链。
 func (h *Handler) handleUnsubscribeRequest(ctx context.Context, _ core.IConnection, hdr core.IHeader, payload []byte, req unsubscribeReq) {
 	requester := hdr.SourceID()
 	h.routeDeliveryRequest(ctx, hdr, payload, requester, permSubscribe, strings.TrimSpace(req.DeliveryID),
@@ -510,6 +524,7 @@ func (h *Handler) handleUnsubscribeRequest(ctx context.Context, _ core.IConnecti
 	)
 }
 
+// handleConnectRequest 与 subscribe 共用建链流程，但允许 requester 显式指定第三方 consumer。
 func (h *Handler) handleConnectRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req connectReq) {
 	requester := hdr.SourceID()
 	h.routeCoordinatorRequest(ctx, conn, hdr, payload, requester, permConnect, req.Producer, req.Consumer,
@@ -522,6 +537,7 @@ func (h *Handler) handleConnectRequest(ctx context.Context, conn core.IConnectio
 	)
 }
 
+// handleDisconnectRequest 负责显式 connect 场景的 delivery 拆除。
 func (h *Handler) handleDisconnectRequest(ctx context.Context, _ core.IConnection, hdr core.IHeader, payload []byte, req disconnectReq) {
 	requester := hdr.SourceID()
 	h.routeDeliveryRequest(ctx, hdr, payload, requester, permConnect, strings.TrimSpace(req.DeliveryID),
@@ -534,6 +550,7 @@ func (h *Handler) handleDisconnectRequest(ctx context.Context, _ core.IConnectio
 	)
 }
 
+// handleSignalRequest 把 pause/resume 等运行期信号路由到 delivery 所在节点，不在入口层解释业务含义。
 func (h *Handler) handleSignalRequest(ctx context.Context, _ core.IConnection, hdr core.IHeader, payload []byte, req signalReq) {
 	requester := hdr.SourceID()
 	h.routeDeliveryRequest(ctx, hdr, payload, requester, "", strings.TrimSpace(req.DeliveryID),
@@ -546,26 +563,31 @@ func (h *Handler) handleSignalRequest(ctx context.Context, _ core.IConnection, h
 	)
 }
 
+// handleDeliveryPrepareRequest 只服务协调阶段，用于在单侧预占 delivery 状态并返回校验结果。
 func (h *Handler) handleDeliveryPrepareRequest(ctx context.Context, hdr core.IHeader, req deliveryPrepareReq) {
 	resp := h.handleDeliveryPrepareLocal(hdr, req)
 	h.sendPrivateResp(ctx, hdr, hdr.SourceID(), actionDeliveryPrepareResp, resp)
 }
 
+// handleDeliveryActivateRequest 在协调成功后切换单侧 delivery 为 active，数据面此后才放行。
 func (h *Handler) handleDeliveryActivateRequest(ctx context.Context, hdr core.IHeader, req deliveryActivateReq) {
 	resp := h.handleDeliveryActivateLocal(req)
 	h.sendPrivateResp(ctx, hdr, hdr.SourceID(), actionDeliveryActivateResp, resp)
 }
 
+// handleDeliveryAbortRequest 在建链中途失败时回收单侧预留状态，避免半开 delivery 残留。
 func (h *Handler) handleDeliveryAbortRequest(ctx context.Context, hdr core.IHeader, req deliveryAbortReq) {
 	resp := h.handleDeliveryAbortLocal(req)
 	h.sendPrivateResp(ctx, hdr, hdr.SourceID(), actionDeliveryAbortResp, resp)
 }
 
+// handleDeliveryCloseRequest 用于已建链 delivery 的收尾，并按需连带删除协调路由。
 func (h *Handler) handleDeliveryCloseRequest(ctx context.Context, hdr core.IHeader, req deliveryCloseReq) {
 	resp := h.handleDeliveryCloseLocal(req)
 	h.sendPrivateResp(ctx, hdr, hdr.SourceID(), actionDeliveryCloseResp, resp)
 }
 
+// handleAnnounceLocal 在 owner 节点登记或幂等更新 source catalog，并拒绝同 ID 的描述冲突。
 func (h *Handler) handleAnnounceLocal(ctx context.Context, hdr core.IHeader, req announceReq) {
 	requester := hdr.SourceID()
 	desc, code, msg := normalizeSourceDescriptor(req.Source, requester)
@@ -592,6 +614,7 @@ func (h *Handler) handleAnnounceLocal(ctx context.Context, hdr core.IHeader, req
 	h.sendAnnounceResp(ctx, hdr, requester, announceResp{ReqID: req.ReqID, Code: 1, Msg: "ok", Source: &out})
 }
 
+// handleWithdrawLocal 撤销 source 后会 best-effort 关闭关联 delivery，防止 catalog 删除后仍残留数据通道。
 func (h *Handler) handleWithdrawLocal(ctx context.Context, hdr core.IHeader, req withdrawReq) {
 	requester := hdr.SourceID()
 	sourceID := strings.TrimSpace(req.SourceID)
@@ -623,6 +646,7 @@ func (h *Handler) handleWithdrawLocal(ctx context.Context, hdr core.IHeader, req
 	h.sendWithdrawResp(ctx, hdr, requester, withdrawResp{ReqID: req.ReqID, Code: 1, Msg: "ok", SourceID: sourceID})
 }
 
+// handleListSourcesLocal 返回 producer 侧 source 快照，避免直接暴露内部 map 引用。
 func (h *Handler) handleListSourcesLocal(ctx context.Context, hdr core.IHeader, req listSourcesReq) {
 	requester := hdr.SourceID()
 	kindFilter := strings.TrimSpace(req.Kind)
@@ -657,6 +681,7 @@ func (h *Handler) handleListSourcesLocal(ctx context.Context, hdr core.IHeader, 
 	})
 }
 
+// handleGetSourceLocal 读取单个 source 描述，并保持响应只返回克隆后的只读副本。
 func (h *Handler) handleGetSourceLocal(ctx context.Context, hdr core.IHeader, req getSourceReq) {
 	requester := hdr.SourceID()
 	sourceID := strings.TrimSpace(req.SourceID)
@@ -676,6 +701,7 @@ func (h *Handler) handleGetSourceLocal(ctx context.Context, hdr core.IHeader, re
 	h.sendGetSourceResp(ctx, hdr, requester, getSourceResp{ReqID: req.ReqID, Code: 1, Msg: "ok", Source: &out})
 }
 
+// handleAnnounceConsumerLocal 在 owner 节点登记 consumer endpoint，并拒绝同 ID 的冲突描述。
 func (h *Handler) handleAnnounceConsumerLocal(ctx context.Context, hdr core.IHeader, req announceConsumerReq) {
 	requester := hdr.SourceID()
 	desc, code, msg := normalizeConsumerDescriptor(req.ConsumerEndpoint, requester)
@@ -702,6 +728,7 @@ func (h *Handler) handleAnnounceConsumerLocal(ctx context.Context, hdr core.IHea
 	h.sendAnnounceConsumerResp(ctx, hdr, requester, announceConsumerResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ConsumerEndpoint: &out})
 }
 
+// handleWithdrawConsumerLocal 撤销 consumer endpoint 后也会尽力清理其关联 delivery。
 func (h *Handler) handleWithdrawConsumerLocal(ctx context.Context, hdr core.IHeader, req withdrawConsumerReq) {
 	requester := hdr.SourceID()
 	consumerID := strings.TrimSpace(req.ConsumerID)
@@ -733,6 +760,7 @@ func (h *Handler) handleWithdrawConsumerLocal(ctx context.Context, hdr core.IHea
 	h.sendWithdrawConsumerResp(ctx, hdr, requester, withdrawConsumerResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ConsumerID: consumerID})
 }
 
+// handleListConsumersLocal 返回 consumer owner 可见的 endpoint 快照，避免把内部状态直接外泄。
 func (h *Handler) handleListConsumersLocal(ctx context.Context, hdr core.IHeader, req listConsumersReq) {
 	requester := hdr.SourceID()
 	kindFilter := strings.TrimSpace(req.Kind)
@@ -767,6 +795,7 @@ func (h *Handler) handleListConsumersLocal(ctx context.Context, hdr core.IHeader
 	})
 }
 
+// handleGetConsumerLocal 读取单个 consumer endpoint，并保持返回值与内部状态解耦。
 func (h *Handler) handleGetConsumerLocal(ctx context.Context, hdr core.IHeader, req getConsumerReq) {
 	requester := hdr.SourceID()
 	consumerID := strings.TrimSpace(req.ConsumerID)
@@ -786,6 +815,7 @@ func (h *Handler) handleGetConsumerLocal(ctx context.Context, hdr core.IHeader, 
 	h.sendGetConsumerResp(ctx, hdr, requester, getConsumerResp{ReqID: req.ReqID, Code: 1, Msg: "ok", ConsumerEndpoint: &out})
 }
 
+// handleSubscribeCoordinatorLocal 处理 requester==consumer 的订阅场景，并把细节交给建链流程。
 func (h *Handler) handleSubscribeCoordinatorLocal(ctx context.Context, hdr core.IHeader, req subscribeReq) {
 	requester := hdr.SourceID()
 	if strings.TrimSpace(req.ReqID) == "" {
@@ -819,6 +849,7 @@ func (h *Handler) handleSubscribeCoordinatorLocal(ctx context.Context, hdr core.
 	})
 }
 
+// handleConnectCoordinatorLocal 处理显式 producer/consumer 连接请求，复用相同的 delivery 协商逻辑。
 func (h *Handler) handleConnectCoordinatorLocal(ctx context.Context, hdr core.IHeader, req connectReq) {
 	requester := hdr.SourceID()
 	if strings.TrimSpace(req.ReqID) == "" {
@@ -839,6 +870,7 @@ func (h *Handler) handleConnectCoordinatorLocal(ctx context.Context, hdr core.IH
 	h.sendConnectResp(ctx, hdr, requester, resp)
 }
 
+// establishDelivery 是协调节点上的两阶段建链入口：先 prepare 两端，再 activate，并在失败时补偿回滚。
 func (h *Handler) establishDelivery(ctx context.Context, requester, producer uint32, sourceID string, consumer uint32, consumerID string, resumeFrom uint64, windowBytes, ackIntervalMs uint32) (connectResp, int, string) {
 	deliveryUUID, err := newUUID()
 	if err != nil {
@@ -967,6 +999,7 @@ func (h *Handler) establishDelivery(ctx context.Context, requester, producer uin
 	}, 1, "ok"
 }
 
+// handleUnsubscribeCoordinatorLocal 只允许 consumer 或原始 requester 主动关闭订阅型 delivery。
 func (h *Handler) handleUnsubscribeCoordinatorLocal(ctx context.Context, hdr core.IHeader, req unsubscribeReq) {
 	requester := hdr.SourceID()
 	route, ok := h.getRoute(strings.TrimSpace(req.DeliveryID))
@@ -982,6 +1015,7 @@ func (h *Handler) handleUnsubscribeCoordinatorLocal(ctx context.Context, hdr cor
 	h.sendUnsubscribeResp(ctx, hdr, requester, unsubscribeResp{ReqID: req.ReqID, Code: code, Msg: msg, DeliveryID: route.DeliveryID, Reason: strings.TrimSpace(req.Reason)})
 }
 
+// handleDisconnectCoordinatorLocal 是显式 connect 场景的协调层关闭入口。
 func (h *Handler) handleDisconnectCoordinatorLocal(ctx context.Context, hdr core.IHeader, req disconnectReq) {
 	requester := hdr.SourceID()
 	route, ok := h.getRoute(strings.TrimSpace(req.DeliveryID))
@@ -993,6 +1027,7 @@ func (h *Handler) handleDisconnectCoordinatorLocal(ctx context.Context, hdr core
 	h.sendDisconnectResp(ctx, hdr, requester, disconnectResp{ReqID: req.ReqID, Code: code, Msg: msg, DeliveryID: route.DeliveryID, Reason: strings.TrimSpace(req.Reason)})
 }
 
+// closeDeliveryRoute 按 producer/consumer 顺序下发 close，并最终回收协调路由。
 func (h *Handler) closeDeliveryRoute(ctx context.Context, route deliveryRoute, reason string) (int, string) {
 	h.mu.Lock()
 	if current := h.deliveryRoutes[route.DeliveryID]; current != nil {
@@ -1071,6 +1106,7 @@ func (h *Handler) handleSignalLocal(ctx context.Context, hdr core.IHeader, req s
 	h.sendSignalResp(ctx, hdr, requester, signalResp{ReqID: req.ReqID, Code: 404, Msg: "delivery not found", DeliveryID: deliveryID, Op: op})
 }
 
+// handleDeliveryPrepareLocal 把 prepare 请求归一到 producer/consumer 两类本地预占逻辑，并补全上下文。
 func (h *Handler) handleDeliveryPrepareLocal(hdr core.IHeader, req deliveryPrepareReq) deliveryPrepareResp {
 	if strings.TrimSpace(req.ReqID) == "" || strings.TrimSpace(req.TxnID) == "" {
 		return deliveryPrepareResp{ReqID: req.ReqID, Code: 400, Msg: "req_id and txn_id required", Role: req.Role}
@@ -1099,6 +1135,7 @@ func (h *Handler) handleDeliveryPrepareLocal(hdr core.IHeader, req deliveryPrepa
 	}
 }
 
+// prepareProducerLocal 在 source owner 节点校验 source 与冲突后，预留 producer 侧 delivery 状态。
 func (h *Handler) prepareProducerLocal(localNode uint32, req deliveryPrepareReq) deliveryPrepareResp {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1158,6 +1195,7 @@ func (h *Handler) prepareProducerLocal(localNode uint32, req deliveryPrepareReq)
 	}
 }
 
+// prepareConsumerLocal 在 consumer owner 节点校验 endpoint 与 kind 后，预留 consumer 侧状态。
 func (h *Handler) prepareConsumerLocal(localNode uint32, req deliveryPrepareReq) deliveryPrepareResp {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1223,6 +1261,7 @@ func (h *Handler) prepareConsumerLocal(localNode uint32, req deliveryPrepareReq)
 	}
 }
 
+// handleDeliveryActivateLocal 只做状态切换，不重新解释 descriptor，保持与 prepare 语义分层。
 func (h *Handler) handleDeliveryActivateLocal(req deliveryActivateReq) deliveryActivateResp {
 	deliveryID := strings.TrimSpace(req.DeliveryID)
 	if deliveryID == "" || strings.TrimSpace(req.TxnID) == "" {
@@ -1253,6 +1292,7 @@ func (h *Handler) handleDeliveryActivateLocal(req deliveryActivateReq) deliveryA
 	return deliveryActivateResp{ReqID: req.ReqID, Code: 1, Msg: "ok", Role: req.Role}
 }
 
+// handleDeliveryAbortLocal 无条件回收对应侧的预留 delivery，用于建链失败补偿。
 func (h *Handler) handleDeliveryAbortLocal(req deliveryAbortReq) deliveryAbortResp {
 	deliveryID := strings.TrimSpace(req.DeliveryID)
 	if deliveryID == "" {
@@ -1274,6 +1314,7 @@ func (h *Handler) handleDeliveryAbortLocal(req deliveryAbortReq) deliveryAbortRe
 	return deliveryAbortResp{ReqID: req.ReqID, Code: 1, Msg: "ok", Role: req.Role}
 }
 
+// handleDeliveryCloseLocal 回收已建链的一侧状态，并按需连带删除协调路由。
 func (h *Handler) handleDeliveryCloseLocal(req deliveryCloseReq) deliveryCloseResp {
 	deliveryID := strings.TrimSpace(req.DeliveryID)
 	if deliveryID == "" {
@@ -1298,6 +1339,7 @@ func (h *Handler) handleDeliveryCloseLocal(req deliveryCloseReq) deliveryCloseRe
 	return deliveryCloseResp{ReqID: req.ReqID, Code: 1, Msg: "ok", Role: req.Role}
 }
 
+// handleData 只接受来自已激活 delivery 的顺序前进数据，并立即回 ACK 推进生产端窗口。
 func (h *Handler) handleData(ctx context.Context, hdr core.IHeader, payload []byte) {
 	if hdr == nil {
 		return
@@ -1343,6 +1385,7 @@ func (h *Handler) handleData(ctx context.Context, hdr core.IHeader, payload []by
 	_ = h.sendToNode(ctx, producer, ackHdr, ackPayload)
 }
 
+// handleAck 只更新生产侧已确认位置，不在 ACK 路径承载额外控制语义。
 func (h *Handler) handleAck(_ context.Context, hdr core.IHeader, payload []byte) {
 	if hdr == nil {
 		return
@@ -1368,6 +1411,7 @@ func (h *Handler) handleAck(_ context.Context, hdr core.IHeader, payload []byte)
 	pd.LastActive = time.Now()
 }
 
+// routeOwnerRequest 封装 owner 型请求的 LCA 判定、父节点信任和权限校验。
 func (h *Handler) routeOwnerRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, requester uint32, perm string, target uint32, sendErr func(int, string), handleLocal func()) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil || srv.ConnManager() == nil {
@@ -1443,6 +1487,7 @@ func (h *Handler) routeOwnerRequest(ctx context.Context, conn core.IConnection, 
 	h.sendToConn(ctx, targetConn, fwdHdr, payload)
 }
 
+// routeCoordinatorRequest 只有在 producer 与 consumer 路由都可见时，才让本节点充当协调者。
 func (h *Handler) routeCoordinatorRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, requester uint32, perm string, producer, consumer uint32, sendErr func(int, string), handleLocal func()) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil || srv.ConnManager() == nil {
@@ -1480,6 +1525,7 @@ func (h *Handler) routeCoordinatorRequest(ctx context.Context, conn core.IConnec
 	handleLocal()
 }
 
+// routeDeliveryRequest 先查本地 delivery/route，再向父节点上送寻找真正持有该 delivery 的节点。
 func (h *Handler) routeDeliveryRequest(ctx context.Context, hdr core.IHeader, payload []byte, requester uint32, perm string, deliveryID string, sendErr func(int, string), handleLocal func()) {
 	if deliveryID == "" {
 		sendErr(400, "delivery_id required")
@@ -1512,6 +1558,7 @@ func (h *Handler) routeDeliveryRequest(ctx context.Context, hdr core.IHeader, pa
 	h.sendToConn(ctx, parent, fwdHdr, payload)
 }
 
+// prepareDelivery 统一屏蔽“目标就是本节点”和“需要私有远程调用”两种 prepare 路径。
 func (h *Handler) prepareDelivery(ctx context.Context, target uint32, req deliveryPrepareReq) (deliveryPrepareResp, int, string) {
 	if target == 0 {
 		return deliveryPrepareResp{}, 400, "target required"
@@ -1531,6 +1578,7 @@ func (h *Handler) prepareDelivery(ctx context.Context, target uint32, req delive
 	return resp, resp.Code, resp.Msg
 }
 
+// activateDelivery 复用私有控制面或本地直调，把 activate 结果统一折叠成 code/msg。
 func (h *Handler) activateDelivery(ctx context.Context, target uint32, req deliveryActivateReq) (int, string) {
 	if target == 0 {
 		return 400, "target required"
@@ -1550,6 +1598,7 @@ func (h *Handler) activateDelivery(ctx context.Context, target uint32, req deliv
 	return resp.Code, resp.Msg
 }
 
+// abortDelivery 供协调节点在失败补偿时统一回收远端或本地的预留状态。
 func (h *Handler) abortDelivery(ctx context.Context, target uint32, req deliveryAbortReq) (int, string) {
 	if target == 0 {
 		return 400, "target required"
@@ -1569,6 +1618,7 @@ func (h *Handler) abortDelivery(ctx context.Context, target uint32, req delivery
 	return resp.Code, resp.Msg
 }
 
+// closeDelivery 供协调节点在正常拆链时关闭单侧 delivery，并兼容本地/远程两种执行路径。
 func (h *Handler) closeDelivery(ctx context.Context, target uint32, req deliveryCloseReq) (int, string) {
 	if target == 0 {
 		return 400, "target required"
@@ -1588,6 +1638,7 @@ func (h *Handler) closeDelivery(ctx context.Context, target uint32, req delivery
 	return resp.Code, resp.Msg
 }
 
+// callPrivate 在私有控制面上发起一次同步等待的远程调用，是协调节点和端点节点之间的桥接层。
 func (h *Handler) callPrivate(ctx context.Context, target uint32, action, respAction, reqID string, data any) (json.RawMessage, error) {
 	ch := h.registerPendingCtrl(reqID)
 	defer h.unregisterPendingCtrl(reqID)
@@ -1707,6 +1758,7 @@ func (h *Handler) sendPrivateResp(ctx context.Context, reqHdr core.IHeader, targ
 	h.sendCtrlRespToNode(ctx, reqHdr, target, action, data)
 }
 
+// sendCtrlRequestToNode 统一封装私有控制请求的发包格式，避免 prepare/activate 各自拼帧。
 func (h *Handler) sendCtrlRequestToNode(ctx context.Context, target uint32, msg message) error {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -1805,6 +1857,7 @@ func (h *Handler) sendToConn(ctx context.Context, conn core.IConnection, hdr cor
 	return srv.Send(ctx, conn.ID(), hdr, payload)
 }
 
+// resolveNextHop 先尝试子树直达，否则回退到父连接，实现树状拓扑下的统一逐跳路由。
 func (h *Handler) resolveNextHop(srv core.IServer, target uint32) (core.IConnection, error) {
 	if srv == nil || srv.ConnManager() == nil {
 		return nil, errors.New("conn manager missing")
@@ -1890,6 +1943,7 @@ func (h *Handler) removeConsumerDeliveryLocked(deliveryID string) {
 	}
 }
 
+// bestEffortCloseLocalProducer 在 source/producer 被撤销时尽力通知另外两端同步收尾。
 func (h *Handler) bestEffortCloseLocalProducer(ctx context.Context, delivery producerDelivery, reason string) {
 	reqID := strings.TrimSpace(delivery.TxnID)
 	if reqID == "" {
@@ -1924,6 +1978,7 @@ func (h *Handler) bestEffortCloseLocalProducer(ctx context.Context, delivery pro
 	}
 }
 
+// bestEffortCloseLocalConsumer 在 consumer endpoint 被撤销时尽力清理整条 delivery。
 func (h *Handler) bestEffortCloseLocalConsumer(ctx context.Context, delivery consumerDelivery, reason string) {
 	reqID := strings.TrimSpace(delivery.TxnID)
 	if reqID == "" {
@@ -1958,6 +2013,7 @@ func (h *Handler) bestEffortCloseLocalConsumer(ctx context.Context, delivery con
 	}
 }
 
+// normalizeSourceDescriptor 把外部 source 描述规整成内部可比较形态，并补默认 owner/枚举值。
 func normalizeSourceDescriptor(desc sourceDescriptor, requester uint32) (sourceDescriptor, int, string) {
 	desc.SourceID = strings.TrimSpace(desc.SourceID)
 	desc.Name = strings.TrimSpace(desc.Name)
@@ -1989,6 +2045,7 @@ func normalizeSourceDescriptor(desc sourceDescriptor, requester uint32) (sourceD
 	return desc, 0, ""
 }
 
+// normalizeConsumerDescriptor 把外部 consumer 描述规整成内部可比较形态，并补默认 owner。
 func normalizeConsumerDescriptor(desc consumerDescriptor, requester uint32) (consumerDescriptor, int, string) {
 	desc.ConsumerID = strings.TrimSpace(desc.ConsumerID)
 	desc.Name = strings.TrimSpace(desc.Name)
@@ -2209,6 +2266,7 @@ func findParentConn(cm core.IConnectionManager) (core.IConnection, uint32) {
 	return parent, parentNode
 }
 
+// resolveRoute 只回答“目标是否在本节点可见路由范围内”，供协调节点判定是否能就地建链。
 func resolveRoute(cm core.IConnectionManager, local, target uint32) (bool, core.IConnection, bool) {
 	if target == 0 {
 		return false, nil, false

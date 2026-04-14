@@ -1,6 +1,6 @@
 package exec
 
-// Context: This file belongs to the SubProto implementation layer around cap_upstream_test.
+// 本文件覆盖 SubProto 中 `exec` 模块里与 `cap_upstream` 相关的行为。
 
 import (
 	"context"

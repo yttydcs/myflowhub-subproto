@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around actions_offline.
+// 本文件承载 SubProto 中 `auth` 模块里与 `actions_offline` 相关的逻辑。
 
 import (
 	"context"

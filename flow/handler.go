@@ -1,6 +1,6 @@
 package flow
 
-// Context: This file belongs to the SubProto implementation layer around handler.
+// 本文件承载 SubProto 中 `flow` 模块里与 `handler` 相关的逻辑。
 
 import (
 	"bytes"
@@ -129,18 +129,22 @@ type varChangedEvent struct {
 	Name  string `json:"name"`
 }
 
+// NewHandler 创建 flow handler，并使用默认依赖。
 func NewHandler(log *slog.Logger) *Handler {
 	return NewHandlerWithOptions(nil, HandlerOptions{}, log)
 }
 
+// NewHandlerWithConfig 用配置初始化 flow 持久化、触发器和 capability 依赖。
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	return NewHandlerWithOptions(cfg, HandlerOptions{}, log)
 }
 
+// NewHandlerWithDeps 允许外部注入 runtime 依赖，同时保持默认 handler 结构不变。
 func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *Handler {
 	return NewHandlerWithOptions(cfg, HandlerOptions{RuntimeDeps: deps}, log)
 }
 
+// NewHandlerWithOptions 是 flow handler 的统一构造入口。
 func NewHandlerWithOptions(cfg core.IConfig, opts HandlerOptions, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
@@ -196,6 +200,7 @@ func (h *Handler) AcceptCmd() bool { return true }
 
 func (h *Handler) SubProto() uint8 { return SubProtoFlow }
 
+// Init 读取配置、预热持久化状态并注册动作表。
 func (h *Handler) Init() bool {
 	cfg := loadConfig(h.cfg)
 	h.baseDir = cfg.BaseDir
@@ -222,6 +227,7 @@ func (h *Handler) Init() bool {
 	return true
 }
 
+// initActions 汇总 set/delete/run/status 等所有 flow 动作。
 func (h *Handler) initActions() {
 	h.ResetActions()
 	for _, act := range registerActions(h) {
@@ -229,6 +235,7 @@ func (h *Handler) initActions() {
 	}
 }
 
+// RegisterLocalMethod 注册 flow 内置或宿主注入的本地方法。
 func (h *Handler) RegisterLocalMethod(method string, fn LocalMethodFunc) {
 	method = strings.TrimSpace(method)
 	if method == "" || fn == nil {
@@ -237,6 +244,7 @@ func (h *Handler) RegisterLocalMethod(method string, fn LocalMethodFunc) {
 	h.localMethods[method] = fn
 }
 
+// registerCapabilities 让 flow 以 provider 身份暴露 `flow::run` 能力。
 func (h *Handler) registerCapabilities() {
 	if h.capRegistry == nil {
 		return
@@ -258,6 +266,7 @@ func (h *Handler) registerCapabilities() {
 	}
 }
 
+// invokeCapabilityRun 把 capability 调用转换成一次普通的 flow 运行入队。
 func (h *Handler) invokeCapabilityRun(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		FlowID string `json:"flow_id"`
@@ -285,6 +294,7 @@ func (h *Handler) invokeCapabilityRun(ctx context.Context, args json.RawMessage)
 	}), nil
 }
 
+// OnReceive 负责 flow 帧解析、响应转发和动作分发。
 func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if srv := core.ServerFromContext(ctx); srv != nil {
 		h.BindServer(srv)
@@ -308,10 +318,12 @@ func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core
 	entry.Handle(ctx, conn, hdr, msg.Data)
 }
 
+// triggerType 返回归一化后的触发器类型，便于后续校验与匹配。
 func triggerType(t trigger) string {
 	return strings.ToLower(strings.TrimSpace(t.Type))
 }
 
+// normalizeTrigger 收敛触发器里的大小写和空白写法。
 func normalizeTrigger(t *trigger) {
 	if t == nil {
 		return
@@ -327,6 +339,7 @@ func normalizeTrigger(t *trigger) {
 	t.VarName = strings.TrimSpace(t.VarName)
 }
 
+// normalizeEventMode 把事件触发模式折叠到固定枚举集合。
 func normalizeEventMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", eventModePublish:
@@ -340,6 +353,7 @@ func normalizeEventMode(mode string) string {
 	}
 }
 
+// validateTrigger 验证 interval/cron/event/var_changed 等触发器配置是否合法。
 func validateTrigger(t trigger) error {
 	dedupWindowMs := 0
 	if t.DedupWindowMs != nil {
@@ -383,6 +397,7 @@ func validateTrigger(t trigger) error {
 	}
 }
 
+// validateFlowRunConfig 检查一次 flow 定义里与运行并发有关的约束。
 func validateFlowRunConfig(req setReq) error {
 	if req.MaxActiveRuns != nil && *req.MaxActiveRuns < 0 {
 		return errors.New("max_active_runs must be >= 0")
@@ -390,6 +405,7 @@ func validateFlowRunConfig(req setReq) error {
 	return nil
 }
 
+// decodeEventData 把 eventbus 的任意载荷重新解码成强类型结构。
 func decodeEventData(data any, out any) bool {
 	if data == nil || out == nil {
 		return false
@@ -404,6 +420,7 @@ func decodeEventData(data any, out any) bool {
 	return true
 }
 
+// forwardRemoteByHeaderTarget 让 flow 的响应帧沿 TargetID 逐跳回到真正的请求方。
 func (h *Handler) forwardRemoteByHeaderTarget(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) bool {
 	if hdr == nil || len(payload) == 0 {
 		return false
@@ -441,6 +458,7 @@ func (h *Handler) forwardRemoteByHeaderTarget(ctx context.Context, conn core.ICo
 	return true
 }
 
+// handleSet 在树上完成 flow.set 的权限裁决、executor 选址与转发。
 func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req setReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -570,6 +588,7 @@ func (h *Handler) handleSet(ctx context.Context, conn core.IConnection, hdr core
 	_ = h.sendToConn(ctx, execConn, downHdr, payloadFrom(message{Action: actionSet, Data: mustJSON(req)}))
 }
 
+// applySetLocal 在 executor 节点真正落盘 flow 定义并刷新 scheduler。
 func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req setReq, origin uint32) {
 	if err := validateFlowRunConfig(req); err != nil {
 		h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 400, Msg: err.Error(), FlowID: req.FlowID})
@@ -594,6 +613,7 @@ func (h *Handler) applySetLocal(ctx context.Context, reqHdr core.IHeader, req se
 	h.sendSetRespToNode(ctx, reqHdr, origin, setResp{ReqID: req.ReqID, Code: 1, Msg: "ok", FlowID: req.FlowID})
 }
 
+// handleDelete 复用和 handleSet 相同的 LCA/forward 思路删除 flow 定义。
 func (h *Handler) handleDelete(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req deleteReq
 	if err := json.Unmarshal(data, &req); err != nil {

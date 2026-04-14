@@ -1,6 +1,6 @@
 package broker
 
-// Context: This file belongs to the SubProto implementation layer around exec_cap_query.
+// 本文件承载 SubProto 中 `broker` 模块里与 `exec_cap_query` 相关的逻辑。
 
 import (
 	"sync"

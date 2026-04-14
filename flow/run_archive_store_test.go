@@ -1,6 +1,6 @@
 package flow
 
-// Context: This file belongs to the SubProto implementation layer around run_archive_store_test.
+// 本文件覆盖 SubProto 中 `flow` 模块里与 `run_archive_store` 相关的行为。
 
 import (
 	"context"

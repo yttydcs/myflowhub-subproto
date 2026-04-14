@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around auth_forward.
+// 本文件承载 SubProto 中 `auth` 模块里与 `auth_forward` 相关的逻辑。
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/header"
 )
 
+// isRemoteAuthorityAdminAction 标记只能由 authority 执行的管理动作。
 func isRemoteAuthorityAdminAction(action string) bool {
 	switch action {
 	case actionListPendingRegisters,
@@ -25,6 +26,7 @@ func isRemoteAuthorityAdminAction(action string) bool {
 	}
 }
 
+// isAuthorityTargetForwardAction 统一维护支持按 TargetID 转发到 authority 的动作集合。
 func isAuthorityTargetForwardAction(action string) bool {
 	switch action {
 	case actionAssistRegister, actionAssistLogin, actionAssistQueryCred:
@@ -34,6 +36,7 @@ func isAuthorityTargetForwardAction(action string) bool {
 	}
 }
 
+// shouldForwardByHeaderTarget 判断当前 Cmd 是否应该沿 header.TargetID 继续送往 authority。
 func (h *LoginHandler) shouldForwardByHeaderTarget(ctx context.Context, hdr core.IHeader, action string) bool {
 	if h == nil || !h.isSemiCentralMode() || hdr == nil || hdr.Major() != header.MajorCmd || hdr.TargetID() == 0 {
 		return false
@@ -45,6 +48,7 @@ func (h *LoginHandler) shouldForwardByHeaderTarget(ctx context.Context, hdr core
 	return isAuthorityTargetForwardAction(action)
 }
 
+// forwardCmdByHeaderTarget 复用树路由把 auth 管理帧逐跳发往目标 authority。
 func (h *LoginHandler) forwardCmdByHeaderTarget(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) (bool, int, string) {
 	if conn == nil || hdr == nil || len(payload) == 0 {
 		return false, 4500, "authority unavailable"
@@ -86,6 +90,7 @@ func (h *LoginHandler) forwardCmdByHeaderTarget(ctx context.Context, conn core.I
 	return true, 0, ""
 }
 
+// sendForwardError 根据原始 action 选择对应响应类型，把 authority 不可达等错误回写给调用方。
 func (h *LoginHandler) sendForwardError(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, frame message, code int, msg string) {
 	if conn == nil || reqHdr == nil {
 		return
@@ -103,6 +108,7 @@ func (h *LoginHandler) sendForwardError(ctx context.Context, conn core.IConnecti
 	}
 }
 
+// buildForwardError 把通用转发失败映射成各 action 自己的响应结构。
 func buildForwardError(action string, data json.RawMessage, code int, msg string) (string, any, bool) {
 	build := func(deviceID string) respData {
 		resp := authorityUnavailableResp(deviceID)
@@ -170,6 +176,7 @@ func buildForwardError(action string, data json.RawMessage, code int, msg string
 	}
 }
 
+// tryForwardAssistUpstream 在 assist 链路上优先复用上游 authority，而不是本节点兜底处理。
 func (h *LoginHandler) tryForwardAssistUpstream(ctx context.Context, conn core.IConnection, hdr core.IHeader, action string, data any, respAction string, deviceID string) bool {
 	if h == nil || !h.isSemiCentralMode() || hdr == nil || hdr.SourceID() == 0 {
 		return false
@@ -189,6 +196,7 @@ func (h *LoginHandler) tryForwardAssistUpstream(ctx context.Context, conn core.I
 	return true
 }
 
+// tryForwardAdminUpstream 处理 authority 管理动作的本地/远程分流，并保留真实 SourceID。
 func (h *LoginHandler) tryForwardAdminUpstream(ctx context.Context, conn core.IConnection, hdr core.IHeader, action string, data any, respAction string, unavailableResp any) bool {
 	if h == nil {
 		return false

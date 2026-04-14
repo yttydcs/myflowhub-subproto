@@ -1,6 +1,6 @@
 package broker
 
-// Context: This file belongs to the SubProto implementation layer around broker.
+// 本文件承载 SubProto 中 `broker` 模块里与 `broker` 相关的逻辑。
 
 import (
 	"strings"
@@ -17,10 +17,12 @@ type Broker[T any] struct {
 	waiters map[string]chan T
 }
 
+// New 创建一个空的进程内响应投递器。
 func New[T any]() *Broker[T] {
 	return &Broker[T]{waiters: make(map[string]chan T)}
 }
 
+// Register 为 reqID 建立等待通道，并返回用于提前取消等待的清理函数。
 func (b *Broker[T]) Register(reqID string) (ch <-chan T, cancel func()) {
 	reqID = strings.TrimSpace(reqID)
 	out := make(chan T, 1)
@@ -50,6 +52,7 @@ func (b *Broker[T]) Register(reqID string) (ch <-chan T, cancel func()) {
 	}
 }
 
+// Deliver 把响应投递给对应等待者；若没有等待者则返回 false。
 func (b *Broker[T]) Deliver(reqID string, resp T) bool {
 	reqID = strings.TrimSpace(reqID)
 	if reqID == "" {

@@ -1,6 +1,6 @@
 package file
 
-// Context: This file belongs to the SubProto implementation layer around path.
+// 本文件承载 SubProto 中 `file` 模块里与 `path` 相关的逻辑。
 
 import (
 	"errors"

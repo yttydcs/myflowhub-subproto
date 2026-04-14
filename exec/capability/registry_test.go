@@ -1,6 +1,6 @@
 package capability
 
-// Context: This file belongs to the SubProto implementation layer around registry_test.
+// 本文件覆盖 SubProto 中 `exec` 模块里与 `registry` 相关的行为。
 
 import (
 	"context"

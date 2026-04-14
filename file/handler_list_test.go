@@ -1,6 +1,6 @@
 package file
 
-// Context: This file belongs to the SubProto implementation layer around handler_list_test.
+// 本文件覆盖 SubProto 中 `file` 模块里与 `handler_list` 相关的行为。
 
 import (
 	"context"

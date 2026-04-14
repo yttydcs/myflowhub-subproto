@@ -1,6 +1,6 @@
 package flow
 
-// Context: This file belongs to the SubProto implementation layer around actions.
+// 本文件承载 SubProto 中 `flow` 模块里与 `actions` 相关的逻辑。
 
 import (
 	core "github.com/yttydcs/myflowhub-core"

@@ -1,6 +1,6 @@
 package exec
 
-// Context: This file belongs to the SubProto implementation layer around handler.
+// 本文件承载 SubProto 中 `exec` 模块里与 `handler` 相关的逻辑。
 
 import (
 	"context"
@@ -59,14 +59,17 @@ const (
 	capPermissionBypassKey = "exec.cap.permission.self_bypass"
 )
 
+// NewHandler 创建 exec handler，并使用默认依赖。
 func NewHandler(log *slog.Logger) *Handler {
 	return NewHandlerWithDeps(nil, runtimedeps.Deps{}, log)
 }
 
+// NewHandlerWithConfig 允许通过配置初始化权限与 capability 相关依赖。
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	return NewHandlerWithDeps(cfg, runtimedeps.Deps{}, log)
 }
 
+// NewHandlerWithDeps 装载 registry、权限配置和内置本地能力。
 func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
@@ -95,11 +98,13 @@ func (h *Handler) AcceptCmd() bool { return true }
 
 func (h *Handler) SubProto() uint8 { return SubProtoExec }
 
+// Init 在 dispatcher 注册期挂载动作表。
 func (h *Handler) Init() bool {
 	h.initActions()
 	return true
 }
 
+// initActions 汇总 exec 模块的 call、cap sync 与 query 动作。
 func (h *Handler) initActions() {
 	h.ResetActions()
 	for _, act := range registerActions(h) {
@@ -107,6 +112,7 @@ func (h *Handler) initActions() {
 	}
 }
 
+// RegisterMethod 把本地方法注册进 capability registry，供 exec.call 与 cap_query 共用。
 func (h *Handler) RegisterMethod(method string, fn MethodFunc) {
 	method = strings.TrimSpace(method)
 	if method == "" || fn == nil {
@@ -126,6 +132,7 @@ func (h *Handler) RegisterMethod(method string, fn MethodFunc) {
 	h.refreshLocalCapsFromRegistry()
 }
 
+// OnReceive 负责 exec 帧解析、返回路径转发以及 action 分派。
 func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if srv := core.ServerFromContext(ctx); srv != nil {
 		h.ensureConnCloseSubscription(srv)
@@ -154,6 +161,7 @@ func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core
 	entry.Handle(ctx, conn, hdr, msg.Data)
 }
 
+// forwardRemoteByHeaderTarget 让 exec 的响应帧按 TargetID 逐跳走回真正的请求方。
 func (h *Handler) forwardRemoteByHeaderTarget(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) bool {
 	if hdr == nil || len(payload) == 0 {
 		return false
@@ -191,6 +199,7 @@ func (h *Handler) forwardRemoteByHeaderTarget(ctx context.Context, conn core.ICo
 	return true
 }
 
+// handleCall 在树形拓扑中完成 exec.call 的 LCA 权限裁决与下游转发。
 func (h *Handler) handleCall(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req CallReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -291,6 +300,7 @@ func (h *Handler) handleCall(ctx context.Context, conn core.IConnection, hdr cor
 	h.sendToConn(ctx, targetConn, downHdr, payloadFrom(message{Action: actionCall, Data: mustJSON(req)}))
 }
 
+// handleCallResp 把 call_resp 投递给同进程等待该 reqID 的 broker。
 func (h *Handler) handleCallResp(_ context.Context, _ core.IConnection, _ core.IHeader, data json.RawMessage) {
 	var resp CallResp
 	if err := json.Unmarshal(data, &resp); err != nil || strings.TrimSpace(resp.ReqID) == "" {
@@ -299,6 +309,7 @@ func (h *Handler) handleCallResp(_ context.Context, _ core.IConnection, _ core.I
 	broker.SharedExecCallBroker().Deliver(resp.ReqID, resp)
 }
 
+// handleCapSnapshot 用完整快照刷新某个子节点的 capability 视图。
 func (h *Handler) handleCapSnapshot(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req CapSnapshotReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -349,6 +360,7 @@ func (h *Handler) handleCapSnapshot(ctx context.Context, conn core.IConnection, 
 	h.maybeSyncSnapshotUpstream(ctx, true)
 }
 
+// handleCapUpsert 增量上推某个子节点新增或更新的 capability。
 func (h *Handler) handleCapUpsert(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req CapUpsertReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -402,6 +414,7 @@ func (h *Handler) handleCapUpsert(ctx context.Context, conn core.IConnection, hd
 	h.maybeSyncSnapshotUpstream(ctx, true)
 }
 
+// handleCapWithdraw 从聚合视图中撤掉子节点不再暴露的 capability。
 func (h *Handler) handleCapWithdraw(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req CapWithdrawReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -467,6 +480,7 @@ func (h *Handler) handleCapWithdraw(ctx context.Context, conn core.IConnection, 
 	h.maybeSyncSnapshotUpstream(ctx, true)
 }
 
+// handleCapHeartbeat 续租子节点上次同步过来的 capability lease。
 func (h *Handler) handleCapHeartbeat(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req CapHeartbeatReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -517,6 +531,7 @@ func (h *Handler) handleCapHeartbeat(ctx context.Context, conn core.IConnection,
 	h.maybeSyncSnapshotUpstream(ctx, true)
 }
 
+// handleCapSyncResp 处理上游对 cap sync 请求的确认，并更新父链缓存状态。
 func (h *Handler) handleCapSyncResp(ctx context.Context, conn core.IConnection, _ core.IHeader, data json.RawMessage) {
 	var resp CapSyncResp
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -572,6 +587,7 @@ func (h *Handler) handleCapSyncResp(ctx context.Context, conn core.IConnection, 
 	}
 }
 
+// handleCapQuery 汇总本地与下游 capability 路由，并在必要时继续上送父链。
 func (h *Handler) handleCapQuery(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req CapQueryReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -612,6 +628,7 @@ func (h *Handler) handleCapQuery(ctx context.Context, conn core.IConnection, hdr
 	})
 }
 
+// handleCapQueryResp 把查询结果投递回等待该 reqID 的本地查询者。
 func (h *Handler) handleCapQueryResp(_ context.Context, _ core.IConnection, _ core.IHeader, data json.RawMessage) {
 	var resp CapQueryResp
 	if err := json.Unmarshal(data, &resp); err != nil || strings.TrimSpace(resp.ReqID) == "" {
@@ -620,6 +637,7 @@ func (h *Handler) handleCapQueryResp(_ context.Context, _ core.IConnection, _ co
 	broker.SharedExecCapQueryBroker().Deliver(resp.ReqID, resp)
 }
 
+// execLocal 在本节点执行真正的方法调用，并把结果包装成 call_resp。
 func (h *Handler) execLocal(ctx context.Context, reqHdr core.IHeader, req CallReq) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -702,6 +720,7 @@ func (h *Handler) sendCallRespToNode(ctx context.Context, reqHdr core.IHeader, t
 	_ = srv.Send(ctx, next.ID(), hdr, body)
 }
 
+// maybeSyncSnapshotUpstream 负责决定何时把本地聚合后的 capability 快照继续同步给父节点。
 func (h *Handler) maybeSyncSnapshotUpstream(ctx context.Context, force bool) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil || srv.ConnManager() == nil {

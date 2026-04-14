@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around actions_up_login_handle_test.
+// 本文件覆盖 SubProto 中 `auth` 模块里与 `actions_up_login_handle` 相关的行为。
 
 import (
 	"bytes"

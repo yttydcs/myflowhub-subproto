@@ -1,6 +1,6 @@
 package forward
 
-// Context: This file belongs to the SubProto implementation layer around forward.
+// 本文件承载 SubProto 中 `forward` 模块里与 `forward` 相关的逻辑。
 
 import (
 	"context"
@@ -21,6 +21,7 @@ type DefaultForwardHandler struct {
 	fallbackParent bool
 }
 
+// NewDefaultForwardHandler 解析默认转发策略，并决定是丢弃、定向转发还是回退到父节点。
 func NewDefaultForwardHandler(cfg core.IConfig, log *slog.Logger) *DefaultForwardHandler {
 	if log == nil {
 		log = slog.Default()
@@ -49,6 +50,7 @@ func NewDefaultForwardHandler(cfg core.IConfig, log *slog.Logger) *DefaultForwar
 	return h
 }
 
+// loadMap 解析 `subproto=nodeID` 形式的定向转发表。
 func (h *DefaultForwardHandler) loadMap(raw string) {
 	pairs := strings.Split(raw, ";")
 	for _, p := range pairs {
@@ -69,14 +71,19 @@ func (h *DefaultForwardHandler) loadMap(raw string) {
 	}
 }
 
+// SubProto 返回默认 handler 使用的兜底子协议号。
 func (h *DefaultForwardHandler) SubProto() uint8 { return 0 }
 
+// Init 默认转发 handler 无额外初始化步骤。
 func (h *DefaultForwardHandler) Init() bool { return true }
 
+// AcceptCmd 返回 false，表示该 handler 不参与命令级二次裁决。
 func (h *DefaultForwardHandler) AcceptCmd() bool { return false }
 
+// AllowSourceMismatch 保持关闭，默认 handler 不放宽 source 校验。
 func (h *DefaultForwardHandler) AllowSourceMismatch() bool { return false }
 
+// OnReceive 在没有显式子协议 handler 时决定转发到指定节点还是父节点。
 func (h *DefaultForwardHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if hdr == nil {
 		return
@@ -109,6 +116,7 @@ func (h *DefaultForwardHandler) OnReceive(ctx context.Context, conn core.IConnec
 	h.log.Debug("unknown subproto dropped", "subproto", hdr.SubProto(), "conn", conn.ID())
 }
 
+// resolveTarget 先查子协议专属路由，再退化到全局 default route。
 func (h *DefaultForwardHandler) resolveTarget(sub uint8) uint32 {
 	if target, ok := h.subTargets[sub]; ok {
 		return target
@@ -116,6 +124,7 @@ func (h *DefaultForwardHandler) resolveTarget(sub uint8) uint32 {
 	return h.subTargets[0]
 }
 
+// forwardToNode 把未知子协议直接发给指定节点，优先使用 node 索引命中。
 func (h *DefaultForwardHandler) forwardToNode(ctx context.Context, srv core.IServer, hdr core.IHeader, payload []byte) {
 	cm := srv.ConnManager()
 	if conn, ok := cm.GetByNode(hdr.TargetID()); ok {
@@ -143,6 +152,7 @@ func (h *DefaultForwardHandler) forwardToNode(ctx context.Context, srv core.ISer
 	}
 }
 
+// forwardToParent 在未配置专属路由时把请求原样上送给父节点。
 func (h *DefaultForwardHandler) forwardToParent(ctx context.Context, srv core.IServer, hdr core.IHeader, payload []byte) {
 	parent, ok := findParentConn(srv.ConnManager())
 	if !ok {
@@ -160,6 +170,7 @@ func (h *DefaultForwardHandler) forwardToParent(ctx context.Context, srv core.IS
 	}
 }
 
+// findParentConn 查找当前连接表中的 parent 连接。
 func findParentConn(cm core.IConnectionManager) (core.IConnection, bool) {
 	var parent core.IConnection
 	cm.Range(func(c core.IConnection) bool {
@@ -174,6 +185,7 @@ func findParentConn(cm core.IConnectionManager) (core.IConnection, bool) {
 	return parent, parent != nil
 }
 
+// parseUint32 是默认转发表解析时共用的整数工具。
 func parseUint32(v string) (uint32, error) {
 	val, err := strconv.ParseUint(strings.TrimSpace(v), 10, 32)
 	return uint32(val), err

@@ -1,6 +1,6 @@
 package file
 
-// Context: This file belongs to the SubProto implementation layer around config_test.
+// 本文件覆盖 SubProto 中 `file` 模块里与 `config` 相关的行为。
 
 import (
 	"os"

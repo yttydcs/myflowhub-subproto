@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around actions_register.
+// 本文件承载 SubProto 中 `auth` 模块里与 `actions_register` 相关的逻辑。
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
 )
 
+// registerRegisterActions 注册设备首次入网所需的 register/assist_register 动作。
 func registerRegisterActions(h *LoginHandler) []core.SubProcessAction {
 	return []core.SubProcessAction{
 		kit.NewAction(actionRegister, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
@@ -28,6 +29,7 @@ func registerRegisterActions(h *LoginHandler) []core.SubProcessAction {
 	}
 }
 
+// handleRegister 汇总 permit、approved、bootstrap 与人工审批几条注册分支。
 func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
 	send := h.sendDirectResp
 	respAction := actionRegisterResp
@@ -127,6 +129,7 @@ func (h *LoginHandler) handleRegister(ctx context.Context, conn core.IConnection
 	h.finishRegisterSuccess(ctx, conn, hdr, send, respAction, req, 0, "", pubRaw, "")
 }
 
+// finishRegisterSuccess 在注册被接受后统一写绑定、补角色并返回成功响应。
 func (h *LoginHandler) finishRegisterSuccess(ctx context.Context, conn core.IConnection, hdr core.IHeader, send func(context.Context, core.IConnection, core.IHeader, string, respData), respAction string, req registerData, nodeID uint32, roleOverride string, pubRaw []byte, requestID string) {
 	if nodeID == 0 {
 		nodeID = h.ensureNodeID(req.DeviceID)
@@ -160,6 +163,7 @@ func (h *LoginHandler) finishRegisterSuccess(ctx context.Context, conn core.ICon
 	h.persistState()
 }
 
+// registerRespApproved 兼容旧字段和新 admission status，两者任一成立都视为批准。
 func registerRespApproved(resp respData) bool {
 	status := strings.ToLower(strings.TrimSpace(resp.Status))
 	if status == "" {
@@ -168,6 +172,7 @@ func registerRespApproved(resp respData) bool {
 	return status == admissionStatusApproved && resp.Code == 1 && resp.NodeID != 0
 }
 
+// handleRegisterResp 消费 pending register 等待项，并把上游结果转发给原始连接。
 func (h *LoginHandler) handleRegisterResp(ctx context.Context, data json.RawMessage) {
 	var resp respData
 	if err := json.Unmarshal(data, &resp); err != nil {

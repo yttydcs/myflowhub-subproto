@@ -1,6 +1,6 @@
 package file
 
-// Context: This file belongs to the SubProto implementation layer around handler.
+// 本文件承载 SubProto 中 `file` 模块里与 `handler` 相关的逻辑。
 
 import (
 	"context"
@@ -100,14 +100,17 @@ type Handler struct {
 	capRegistry *execcap.Registry
 }
 
+// NewHandler 提供零配置入口，适合默认模块集合直接装配 File 子协议。
 func NewHandler(log *slog.Logger) *Handler {
 	return NewHandlerWithDeps(nil, runtimedeps.Deps{}, log)
 }
 
+// NewHandlerWithConfig 在保留默认依赖解析的同时接入外部配置。
 func NewHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *Handler {
 	return NewHandlerWithDeps(cfg, runtimedeps.Deps{}, log)
 }
 
+// NewHandlerWithDeps 是统一装配入口：补默认 logger、解析运行时依赖并注册 capability。
 func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
@@ -125,6 +128,7 @@ func NewHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logge
 	return h
 }
 
+// registerCapabilities 只在存在 capability registry 时暴露本地 file 能力，避免反向依赖 exec。
 func (h *Handler) registerCapabilities() {
 	if h.capRegistry == nil {
 		return
@@ -158,6 +162,7 @@ func (h *Handler) registerCapabilities() {
 	}, execcap.InvokeFunc(h.invokeCapabilityMkdir))
 }
 
+// invokeCapabilityList 复用本地目录清洗与根目录自建语义，但直接返回 capability 结果。
 func (h *Handler) invokeCapabilityList(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		Dir string `json:"dir,omitempty"`
@@ -207,6 +212,7 @@ func (h *Handler) invokeCapabilityList(_ context.Context, args json.RawMessage) 
 	return raw, nil
 }
 
+// invokeCapabilityReadText 暴露轻量文本读取入口，并限制最大字节数与编码类型。
 func (h *Handler) invokeCapabilityReadText(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		Dir      string `json:"dir,omitempty"`
@@ -264,6 +270,7 @@ func (h *Handler) invokeCapabilityReadText(_ context.Context, args json.RawMessa
 	return raw, nil
 }
 
+// invokeCapabilityMkdir 复用本地 mkdir 安全边界，让 capability 调用与控制面语义保持一致。
 func (h *Handler) invokeCapabilityMkdir(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		Dir  string `json:"dir,omitempty"`
@@ -288,6 +295,7 @@ func (h *Handler) SubProto() uint8 { return SubProtoFile }
 
 func (h *Handler) Init() bool { return true }
 
+// OnReceive 按首字节分流 CTRL/DATA/ACK，并只在控制面入口顺带触发清理协程。
 func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if hdr == nil || len(payload) == 0 {
 		return
@@ -305,6 +313,7 @@ func (h *Handler) OnReceive(ctx context.Context, conn core.IConnection, hdr core
 	}
 }
 
+// handleCtrl 解析 file 控制面 action；本地消费响应，非本节点目标继续逐跳转发。
 func (h *Handler) handleCtrl(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	if len(payload) < 2 {
 		return
@@ -354,6 +363,7 @@ func (h *Handler) handleCtrl(ctx context.Context, conn core.IConnection, hdr cor
 	}
 }
 
+// handleReadRequest 先把不同 read op 归一成目标节点与权限要求，再复用统一路由入口。
 func (h *Handler) handleReadRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req readReq) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -403,6 +413,7 @@ func (h *Handler) handleReadRequest(ctx context.Context, conn core.IConnection, 
 	)
 }
 
+// handleWriteRequest 让 offer 和 mkdir 共用同一条权限与路由链路，只在本地执行阶段分支。
 func (h *Handler) handleWriteRequest(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte, req writeReq) {
 	op := strings.ToLower(strings.TrimSpace(req.Op))
 	requester := hdr.SourceID()
@@ -444,6 +455,7 @@ func (h *Handler) handleWriteRequest(ctx context.Context, conn core.IConnection,
 	}
 }
 
+// routeCtrlRequest 封装 file 控制面的 LCA 判定、父节点信任、权限校验和逐跳转发。
 func (h *Handler) routeCtrlRequest(
 	ctx context.Context,
 	conn core.IConnection,
@@ -705,6 +717,7 @@ func findParentConn(cm core.IConnectionManager) (core.IConnection, uint32) {
 	return parent, parentNode
 }
 
+// handleListLocal 负责本地目录枚举，并对根目录保留“缺失时自动创建”的特殊语义。
 func (h *Handler) handleListLocal(ctx context.Context, hdr core.IHeader, req readReq, cfg handlerConfig) {
 	requester := uint32(0)
 	if hdr != nil {
@@ -754,6 +767,7 @@ func (h *Handler) handleListLocal(ctx context.Context, hdr core.IHeader, req rea
 	h.sendReadResp(ctx, hdr, requester, readResp{Code: 1, Msg: "ok", Op: opList, Dir: dir, Files: files, Dirs: dirs})
 }
 
+// handleMkdirLocal 把 mkdir 结果映射成 write_resp，补齐 provider/consumer 便于远端关联。
 func (h *Handler) handleMkdirLocal(ctx context.Context, hdr core.IHeader, req writeReq, cfg handlerConfig) {
 	requester := uint32(0)
 	if hdr != nil {
@@ -777,6 +791,7 @@ func (h *Handler) handleMkdirLocal(ctx context.Context, hdr core.IHeader, req wr
 	h.sendWriteResp(ctx, hdr, requester, resp)
 }
 
+// handleReadTextLocal 在本地完成只读文本提取，显式处理路径、大小和编码边界。
 func (h *Handler) handleReadTextLocal(ctx context.Context, hdr core.IHeader, req readReq, cfg handlerConfig) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil || hdr == nil {
@@ -849,6 +864,7 @@ func (h *Handler) handleReadTextLocal(ctx context.Context, hdr core.IHeader, req
 	})
 }
 
+// handlePullAsProvider 为 pull 请求创建发送端会话，并把断点续传参数回传给消费者。
 func (h *Handler) handlePullAsProvider(ctx context.Context, hdr core.IHeader, req readReq, cfg handlerConfig) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -923,6 +939,7 @@ func (h *Handler) handlePullAsProvider(ctx context.Context, hdr core.IHeader, re
 	go h.sendFileData(ctx, sid)
 }
 
+// handleReadRespLocal 在消费者侧接管 pull 响应，建立接收会话或在已完成续传场景直接收尾。
 func (h *Handler) handleReadRespLocal(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
 	var resp readResp
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -1014,6 +1031,7 @@ func (h *Handler) handleReadRespLocal(ctx context.Context, hdr core.IHeader, dat
 	})
 }
 
+// handleOfferAsConsumer 作为接收侧准入点，负责路径校验、续传协商和落盘会话初始化。
 func (h *Handler) handleOfferAsConsumer(ctx context.Context, hdr core.IHeader, req writeReq, cfg handlerConfig) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -1148,6 +1166,7 @@ func (h *Handler) handleOfferAsConsumer(ctx context.Context, hdr core.IHeader, r
 	})
 }
 
+// handleWriteRespLocal 在提供方收到 accept 后创建发送会话，真正的数据发送异步进行。
 func (h *Handler) handleWriteRespLocal(ctx context.Context, hdr core.IHeader, data json.RawMessage) {
 	var resp writeResp
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -1202,6 +1221,7 @@ func (h *Handler) handleWriteRespLocal(ctx context.Context, hdr core.IHeader, da
 	go h.sendFileData(ctx, sid)
 }
 
+// handleData 只接受与当前接收会话方向一致的 DATA 帧，并在推进后决定是否 ACK/收尾。
 func (h *Handler) handleData(ctx context.Context, _ core.IConnection, hdr core.IHeader, payload []byte) {
 	if hdr == nil {
 		return
@@ -1239,6 +1259,7 @@ func (h *Handler) handleData(ctx context.Context, _ core.IConnection, hdr core.I
 	}
 }
 
+// applyRecvChunk 维护接收侧顺序写入与乱序缓存，把可连续冲刷的数据尽量一次性落盘。
 func (h *Handler) applyRecvChunk(s *recvSession, offset uint64, data []byte, fin bool, now time.Time) (expected uint64, completed bool, wrote bool) {
 	if s == nil {
 		return 0, false, false
@@ -1301,6 +1322,7 @@ func (h *Handler) applyRecvChunk(s *recvSession, offset uint64, data []byte, fin
 	return expected, completed, wrote
 }
 
+// maybeSendAck 用步长与时间双阈值压缩 ACK 频率，避免每个 chunk 都回包。
 func (h *Handler) maybeSendAck(ctx context.Context, s *recvSession, expected uint64, now time.Time) {
 	if s == nil {
 		return
@@ -1336,6 +1358,7 @@ func (h *Handler) maybeSendAck(ctx context.Context, s *recvSession, expected uin
 	h.sendToNode(ctx, provider, hdr, payload)
 }
 
+// sendToNode 根据目标节点解析下一跳，让 DATA/ACK 与控制面共用同一层树状路由。
 func (h *Handler) sendToNode(ctx context.Context, target uint32, hdr core.IHeader, payload []byte) {
 	if target == 0 || hdr == nil || len(payload) == 0 {
 		return
@@ -1357,6 +1380,7 @@ func (h *Handler) sendToNode(ctx context.Context, target uint32, hdr core.IHeade
 	h.sendToConn(ctx, next, hdr, payload)
 }
 
+// finishRecvSession 在收齐后统一做刷盘、校验、原子替换与会话回收。
 func (h *Handler) finishRecvSession(ctx context.Context, sid [16]byte) {
 	sess := h.getRecvSession(sid)
 	if sess == nil {
@@ -1393,6 +1417,7 @@ func (h *Handler) finishRecvSession(ctx context.Context, sid [16]byte) {
 	h.removeRecvSession(sid)
 }
 
+// verifyPart 用 size 加可选 sha256 校验 part 文件，避免残片被误提升为正式文件。
 func (h *Handler) verifyPart(path string, size uint64, shaHex string) bool {
 	st, err := os.Stat(path)
 	if err != nil || st.IsDir() {
@@ -1411,6 +1436,7 @@ func (h *Handler) verifyPart(path string, size uint64, shaHex string) bool {
 	return strings.EqualFold(strings.TrimSpace(shaHex), sum)
 }
 
+// sha256File 为完整性校验提供独立 helper，避免哈希细节散落到会话流程里。
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1424,6 +1450,7 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// handleAck 只更新发送侧的已确认进度，不在 ACK 路径做额外状态迁移。
 func (h *Handler) handleAck(ctx context.Context, _ core.IConnection, hdr core.IHeader, payload []byte) {
 	if hdr == nil {
 		return
@@ -1447,6 +1474,7 @@ func (h *Handler) handleAck(ctx context.Context, _ core.IConnection, hdr core.IH
 	sess.mu.Unlock()
 }
 
+// sendFileData 按 chunk 顺序读取文件并发送 DATA 帧，结束后回收发送会话。
 func (h *Handler) sendFileData(ctx context.Context, sid [16]byte) {
 	sess := h.getSendSession(sid)
 	if sess == nil {
@@ -1571,6 +1599,7 @@ func (h *Handler) removeSendSession(id [16]byte) {
 	h.mu.Unlock()
 }
 
+// maybeJanitor 以低频、单实例方式触发后台清理，避免每次控制请求都重扫磁盘。
 func (h *Handler) maybeJanitor(ctx context.Context) {
 	cfg := loadConfig(h.cfg)
 	if cfg.IncompleteTTLSec <= 0 {
@@ -1598,6 +1627,7 @@ func (h *Handler) maybeJanitor(ctx context.Context) {
 	}()
 }
 
+// cleanupExpiredSessions 清理超时未完成的接收会话，并同步关闭句柄/删除 part 文件。
 func (h *Handler) cleanupExpiredSessions(cfg handlerConfig) {
 	if cfg.IncompleteTTLSec <= 0 {
 		return
@@ -1640,6 +1670,7 @@ func (h *Handler) cleanupExpiredSessions(cfg handlerConfig) {
 	h.mu.Unlock()
 }
 
+// cleanupExpiredParts 在磁盘层补扫遗留 .part，处理进程重启后内存态已丢失的脏数据。
 func (h *Handler) cleanupExpiredParts(cfg handlerConfig) {
 	if cfg.IncompleteTTLSec <= 0 || strings.TrimSpace(cfg.BaseDir) == "" {
 		return

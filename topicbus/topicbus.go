@@ -1,6 +1,6 @@
 package topicbus
 
-// Context: This file belongs to the SubProto implementation layer around topicbus.
+// 本文件承载 SubProto 中 `topicbus` 模块里与 `topicbus` 相关的逻辑。
 
 import (
 	"context"
@@ -46,14 +46,17 @@ type TopicBusHandler struct {
 	capRegistry *execcap.Registry
 }
 
+// NewTopicBusHandler 提供零配置装配入口，适合默认模块集合直接接线。
 func NewTopicBusHandler(log *slog.Logger) *TopicBusHandler {
 	return NewTopicBusHandlerWithDeps(nil, runtimedeps.Deps{}, log)
 }
 
+// NewTopicBusHandlerWithConfig 允许 TopicBus 读取配置，但仍沿用默认依赖解析策略。
 func NewTopicBusHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *TopicBusHandler {
 	return NewTopicBusHandlerWithDeps(cfg, runtimedeps.Deps{}, log)
 }
 
+// NewTopicBusHandlerWithDeps 是统一装配入口：解析运行时依赖并初始化订阅索引。
 func NewTopicBusHandlerWithDeps(cfg core.IConfig, deps runtimedeps.Deps, log *slog.Logger) *TopicBusHandler {
 	if log == nil {
 		log = slog.Default()
@@ -98,6 +101,7 @@ var capabilityTopicPublishInputSchema = json.RawMessage(`{
   }
 }`)
 
+// registerCapabilities 只在存在 capability registry 时暴露 topicbus::publish，避免反向强耦合 exec。
 func (h *TopicBusHandler) registerCapabilities() {
 	if h.capRegistry == nil {
 		return
@@ -112,6 +116,7 @@ func (h *TopicBusHandler) registerCapabilities() {
 	}, execcap.InvokeFunc(h.invokeCapabilityPublish))
 }
 
+// invokeCapabilityPublish 复用普通 publish 的本地下发与上游汇聚语义。
 func (h *TopicBusHandler) invokeCapabilityPublish(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	var req publishReq
 	if err := json.Unmarshal(args, &req); err != nil {
@@ -138,12 +143,14 @@ func (h *TopicBusHandler) invokeCapabilityPublish(ctx context.Context, args json
 
 func (h *TopicBusHandler) SubProto() uint8 { return SubProtoTopicBus }
 
+// Init 集中完成 action 表与 capability 暴露，避免懒初始化带来分叉状态。
 func (h *TopicBusHandler) Init() bool {
 	h.initActions()
 	h.registerCapabilities()
 	return true
 }
 
+// initActions 重建 action 注册表，保证重复初始化或测试复用时行为一致。
 func (h *TopicBusHandler) initActions() {
 	h.ResetActions()
 	for _, act := range registerActions(h) {
@@ -151,6 +158,7 @@ func (h *TopicBusHandler) initActions() {
 	}
 }
 
+// OnReceive 在真正分发前先补齐连接关闭监听与父链路重订阅，再按 action 分派。
 func (h *TopicBusHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	h.ensureConnCloseSubscription(ctx)
 	h.maybeResubscribeUpstream(ctx)
@@ -168,6 +176,7 @@ func (h *TopicBusHandler) OnReceive(ctx context.Context, conn core.IConnection, 
 	entry.Handle(ctx, conn, hdr, msg.Data)
 }
 
+// handleSubscribe 记录单 topic 订阅，并在首次激活时向上游声明需求。
 func (h *TopicBusHandler) handleSubscribe(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req subscribeReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -179,6 +188,7 @@ func (h *TopicBusHandler) handleSubscribe(ctx context.Context, conn core.IConnec
 	h.maybeSubscribeUpstream(ctx, needUp)
 }
 
+// handleSubscribeBatch 复用同一套索引逻辑，减少逐 topic 上送的往返噪声。
 func (h *TopicBusHandler) handleSubscribeBatch(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req subscribeBatchReq
 	_ = json.Unmarshal(data, &req)
@@ -187,6 +197,7 @@ func (h *TopicBusHandler) handleSubscribeBatch(ctx context.Context, conn core.IC
 	h.maybeSubscribeUpstream(ctx, needUp)
 }
 
+// handleUnsubscribe 在本节点最后一个订阅者消失时尝试同步上游退订。
 func (h *TopicBusHandler) handleUnsubscribe(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req subscribeReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -198,6 +209,7 @@ func (h *TopicBusHandler) handleUnsubscribe(ctx context.Context, conn core.IConn
 	h.maybeUnsubscribeUpstream(ctx, needUpUnsub)
 }
 
+// handleUnsubscribeBatch 批量回收订阅关系，避免连接侧循环发送退订帧。
 func (h *TopicBusHandler) handleUnsubscribeBatch(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req subscribeBatchReq
 	_ = json.Unmarshal(data, &req)
@@ -206,11 +218,13 @@ func (h *TopicBusHandler) handleUnsubscribeBatch(ctx context.Context, conn core.
 	h.maybeUnsubscribeUpstream(ctx, needUpUnsub)
 }
 
+// handleListSubs 回显当前连接的订阅快照，便于客户端做状态对齐。
 func (h *TopicBusHandler) handleListSubs(ctx context.Context, conn core.IConnection, hdr core.IHeader, _ json.RawMessage) {
 	topics := h.listConnTopics(conn)
 	h.sendSimpleResp(ctx, conn, hdr, actionListSubsResp, listResp{Code: 1, Topics: topics})
 }
 
+// handlePublish 先向下广播，再向父节点汇聚，保持树状 TopicBus 的单向扩散顺序。
 func (h *TopicBusHandler) handlePublish(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
 	var req publishReq
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -229,6 +243,7 @@ func (h *TopicBusHandler) handlePublish(ctx context.Context, conn core.IConnecti
 	h.forwardPublishUpstream(ctx, conn, payload)
 }
 
+// publishFlowTriggerEvent 把 publish 镜像成 eventbus 事件，供 flow trigger 等本地模块订阅。
 func (h *TopicBusHandler) publishFlowTriggerEvent(ctx context.Context, hdr core.IHeader, req publishReq) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -254,6 +269,7 @@ func (h *TopicBusHandler) publishFlowTriggerEvent(ctx context.Context, hdr core.
 	}
 }
 
+// publishFlowReceivedEvent 只标记来自父节点的下行消息，区分“本地发起”和“上游下发”。
 func (h *TopicBusHandler) publishFlowReceivedEvent(ctx context.Context, conn core.IConnection, hdr core.IHeader, req publishReq) {
 	if conn == nil || !isParentConn(conn) {
 		return
@@ -284,6 +300,7 @@ func (h *TopicBusHandler) publishFlowReceivedEvent(ctx context.Context, conn cor
 	}
 }
 
+// sendSimpleResp 统一构造 TopicBus 控制面响应，避免各 action 自己拼 header。
 func (h *TopicBusHandler) sendSimpleResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any) {
 	if conn == nil {
 		return
@@ -298,6 +315,7 @@ func (h *TopicBusHandler) sendSimpleResp(ctx context.Context, conn core.IConnect
 	_ = conn.SendWithHeader(hdr, payload, header.HeaderTcpCodec{})
 }
 
+// buildRespHeader 尽量复用请求链路标识，同时把 source/target 收口到当前节点与调用方。
 func (h *TopicBusHandler) buildRespHeader(ctx context.Context, reqHdr core.IHeader) core.IHeader {
 	base := &header.HeaderTcp{}
 	if reqHdr != nil {
@@ -391,6 +409,7 @@ func (h *TopicBusHandler) removeSubscriptions(conn core.IConnection, topics []st
 	return needUpUnsub
 }
 
+// listConnTopics 返回排序后的连接订阅快照，便于上层稳定比较。
 func (h *TopicBusHandler) listConnTopics(conn core.IConnection) []string {
 	if conn == nil {
 		return nil
@@ -407,6 +426,7 @@ func (h *TopicBusHandler) listConnTopics(conn core.IConnection) []string {
 	return out
 }
 
+// broadcastToSubscribers 先拍快照再发送，避免持锁 I/O，并显式跳过来源连接。
 func (h *TopicBusHandler) broadcastToSubscribers(ctx context.Context, src core.IConnection, topic string, payload []byte) {
 	if len(payload) == 0 {
 		return
@@ -449,6 +469,7 @@ func (h *TopicBusHandler) broadcastToSubscribers(ctx context.Context, src core.I
 	}
 }
 
+// forwardPublishUpstream 只把本地或子节点产生的 publish 上送一次，防止父链路回环。
 func (h *TopicBusHandler) forwardPublishUpstream(ctx context.Context, src core.IConnection, payload []byte) {
 	parent := h.findParent(ctx)
 	if parent == nil {
@@ -460,6 +481,7 @@ func (h *TopicBusHandler) forwardPublishUpstream(ctx context.Context, src core.I
 	h.forwardToConn(ctx, parent, payload)
 }
 
+// maybeSubscribeUpstream 在 topic 从 0->1 时补发上游订阅，失败则回滚预占标记。
 func (h *TopicBusHandler) maybeSubscribeUpstream(ctx context.Context, topics []string) {
 	if len(topics) == 0 {
 		return
@@ -475,6 +497,7 @@ func (h *TopicBusHandler) maybeSubscribeUpstream(ctx context.Context, topics []s
 	}
 }
 
+// maybeUnsubscribeUpstream 在本地最后一个订阅者消失时尝试上游退订。
 func (h *TopicBusHandler) maybeUnsubscribeUpstream(ctx context.Context, topics []string) {
 	if len(topics) == 0 {
 		return
@@ -489,6 +512,7 @@ func (h *TopicBusHandler) maybeUnsubscribeUpstream(ctx context.Context, topics [
 	}
 }
 
+// rollbackUpstreamMarks 撤销补订阅前的预占状态，让后续重试仍能触发上游同步。
 func (h *TopicBusHandler) rollbackUpstreamMarks(topics []string, active bool) {
 	h.mu.Lock()
 	for _, t := range topics {
@@ -500,6 +524,7 @@ func (h *TopicBusHandler) rollbackUpstreamMarks(topics []string, active bool) {
 	h.mu.Unlock()
 }
 
+// forwardSubscribeBatch 把本地索引变化压缩成一次 batch 上游控制帧。
 func (h *TopicBusHandler) forwardSubscribeBatch(ctx context.Context, target core.IConnection, topics []string) error {
 	req := subscribeBatchReq{Topics: uniqueStable(topics)}
 	raw, _ := json.Marshal(req)
@@ -507,6 +532,7 @@ func (h *TopicBusHandler) forwardSubscribeBatch(ctx context.Context, target core
 	return h.forwardToConn(ctx, target, payload)
 }
 
+// forwardUnsubscribeBatch 把上游退订也收口为 batch，避免逐 topic 放大控制流量。
 func (h *TopicBusHandler) forwardUnsubscribeBatch(ctx context.Context, target core.IConnection, topics []string) error {
 	req := subscribeBatchReq{Topics: uniqueStable(topics)}
 	raw, _ := json.Marshal(req)
@@ -514,6 +540,7 @@ func (h *TopicBusHandler) forwardUnsubscribeBatch(ctx context.Context, target co
 	return h.forwardToConn(ctx, target, payload)
 }
 
+// forwardToConn 统一封装 TopicBus 上下游转发 header，避免调用方重复构帧。
 func (h *TopicBusHandler) forwardToConn(ctx context.Context, target core.IConnection, payload []byte) error {
 	if target == nil || len(payload) == 0 {
 		return nil
@@ -529,6 +556,7 @@ func (h *TopicBusHandler) forwardToConn(ctx context.Context, target core.IConnec
 	return srv.Send(ctx, target.ID(), hdr, payload)
 }
 
+// findParent 从连接元数据中定位父连接，作为所有上游动作的唯一出口。
 func (h *TopicBusHandler) findParent(ctx context.Context) core.IConnection {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -590,6 +618,7 @@ func isParentConn(conn core.IConnection) bool {
 	return false
 }
 
+// maybeResubscribeUpstream 在父连接切换后补发当前活跃 topic，修复重连后的上游状态丢失。
 func (h *TopicBusHandler) maybeResubscribeUpstream(ctx context.Context) {
 	parent := h.findParent(ctx)
 	if parent == nil {
@@ -634,6 +663,7 @@ func (h *TopicBusHandler) maybeResubscribeUpstream(ctx context.Context) {
 	h.mu.Unlock()
 }
 
+// snapshotActiveTopics 提取仍有本地订阅者的 topic 快照，供重订阅流程复用。
 func (h *TopicBusHandler) snapshotActiveTopics() []string {
 	h.mu.RLock()
 	topics := make([]string, 0, len(h.topicSubs))
@@ -647,6 +677,7 @@ func (h *TopicBusHandler) snapshotActiveTopics() []string {
 	return topics
 }
 
+// ensureConnCloseSubscription 只订阅一次 conn.closed，并在连接断开时回收订阅索引。
 func (h *TopicBusHandler) ensureConnCloseSubscription(ctx context.Context) {
 	srv := core.ServerFromContext(ctx)
 	if srv == nil {
@@ -668,6 +699,7 @@ func (h *TopicBusHandler) ensureConnCloseSubscription(ctx context.Context) {
 	})
 }
 
+// removeConnAll 在连接关闭时批量删除其所有订阅，并计算需要上游退订的 topic。
 func (h *TopicBusHandler) removeConnAll(connID string) []string {
 	h.mu.Lock()
 	topics, ok := h.connSubs[connID]
@@ -693,6 +725,7 @@ func (h *TopicBusHandler) removeConnAll(connID string) []string {
 	return needUp
 }
 
+// parseConnClosed 兼容不同字段命名，把事件总线里的关闭事件规整为统一结构。
 func parseConnClosed(data any) (string, uint32) {
 	switch v := data.(type) {
 	case map[string]any:
@@ -734,6 +767,7 @@ func parseConnClosed(data any) (string, uint32) {
 	}
 }
 
+// uniqueStable 按输入顺序去重，避免 batch 请求和响应里出现重复 topic。
 func uniqueStable(in []string) []string {
 	if len(in) == 0 {
 		return nil

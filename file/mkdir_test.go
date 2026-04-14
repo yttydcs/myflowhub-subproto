@@ -1,6 +1,6 @@
 package file
 
-// Context: This file belongs to the SubProto implementation layer around mkdir_test.
+// 本文件覆盖 SubProto 中 `file` 模块里与 `mkdir` 相关的行为。
 
 import (
 	"os"

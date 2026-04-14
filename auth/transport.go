@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around transport.
+// 本文件承载 SubProto 中 `auth` 模块里与 `transport` 相关的逻辑。
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/header"
 )
 
+// setPending 记录一次需要等待 authority 回包的下游请求。
 func (h *LoginHandler) setPending(deviceID, connID string, hdr core.IHeader) {
 	var msgID uint32
 	var traceID uint32
@@ -27,6 +28,7 @@ func (h *LoginHandler) setPending(deviceID, connID string, hdr core.IHeader) {
 	h.mu.Unlock()
 }
 
+// popPending 取出并消费等待中的请求映射，避免重复回包。
 func (h *LoginHandler) popPending(deviceID string) (pendingInfo, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -37,11 +39,13 @@ func (h *LoginHandler) popPending(deviceID string) (pendingInfo, bool) {
 	return id, ok
 }
 
+// buildPendingRespHeader 保留原始 msg/trace id，让回包能和下游请求一一对应。
 func (h *LoginHandler) buildPendingRespHeader(ctx context.Context, pending pendingInfo) core.IHeader {
 	hdr := h.buildHeader(ctx, nil)
 	return hdr.WithMsgID(pending.msgID).WithTraceID(pending.traceID)
 }
 
+// sendResp 发送 auth 常规响应，并在必要时自动补当前 HubID。
 func (h *LoginHandler) sendResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
 	msg := message{Action: action}
 	raw, _ := json.Marshal(data)
@@ -68,6 +72,7 @@ func (h *LoginHandler) sendResp(ctx context.Context, conn core.IConnection, reqH
 	}
 }
 
+// sendAssistResp 在 assist 链路里优先使用 targeted response，确保响应能回到原始 source。
 func (h *LoginHandler) sendAssistResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
 	if reqHdr != nil && reqHdr.SourceID() != 0 {
 		h.sendTargetedResp(ctx, conn, reqHdr, action, data)
@@ -76,6 +81,7 @@ func (h *LoginHandler) sendAssistResp(ctx context.Context, conn core.IConnection
 	h.sendResp(ctx, conn, reqHdr, action, data)
 }
 
+// sendDirectResp 强制走 direct response 语义，用于本地 register/login 等入口。
 func (h *LoginHandler) sendDirectResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
 	msg := message{Action: action}
 	raw, _ := json.Marshal(data)
@@ -102,6 +108,7 @@ func (h *LoginHandler) sendDirectResp(ctx context.Context, conn core.IConnection
 	}
 }
 
+// sendTargetedResp 基于原始 header 构造逐跳可见的 targeted response。
 func (h *LoginHandler) sendTargetedResp(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data respData) {
 	if conn == nil || reqHdr == nil {
 		return
@@ -127,6 +134,7 @@ func (h *LoginHandler) sendTargetedResp(ctx context.Context, conn core.IConnecti
 	_ = conn.SendWithHeader(header.BuildTCPResponse(reqHdr, uint32(len(payload)), 2), payload, codec)
 }
 
+// sendTargetedActionData 是 targeted response 的通用数据版，给 admin action 复用。
 func (h *LoginHandler) sendTargetedActionData(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any) {
 	if conn == nil || reqHdr == nil {
 		return
@@ -145,6 +153,7 @@ func (h *LoginHandler) sendTargetedActionData(ctx context.Context, conn core.ICo
 	_ = conn.SendWithHeader(respHdr, payload, codec)
 }
 
+// sendActionData 统一封装 admin/list 等 action 的响应发送逻辑。
 func (h *LoginHandler) sendActionData(ctx context.Context, conn core.IConnection, reqHdr core.IHeader, action string, data any, direct bool) {
 	if conn == nil {
 		return
@@ -170,6 +179,7 @@ func (h *LoginHandler) sendActionData(ctx context.Context, conn core.IConnection
 	_ = conn.SendWithHeader(hdr, payload, codec)
 }
 
+// buildHeader 生成 auth 默认响应头；有请求头时尽量沿用原始链路信息。
 func (h *LoginHandler) buildHeader(ctx context.Context, reqHdr core.IHeader) core.IHeader {
 	if reqHdr != nil {
 		return reqHdr.Clone()
@@ -182,6 +192,7 @@ func (h *LoginHandler) buildHeader(ctx context.Context, reqHdr core.IHeader) cor
 	return base.WithMajor(header.MajorOKResp).WithSubProto(2).WithSourceID(src).WithTargetID(0)
 }
 
+// buildDirectRespHeader 在 direct response 场景下显式切到 OKResp。
 func (h *LoginHandler) buildDirectRespHeader(ctx context.Context, reqHdr core.IHeader) core.IHeader {
 	if reqHdr != nil {
 		return reqHdr.Clone().WithMajor(header.MajorOKResp)
@@ -189,6 +200,7 @@ func (h *LoginHandler) buildDirectRespHeader(ctx context.Context, reqHdr core.IH
 	return h.buildHeader(ctx, nil)
 }
 
+// forward 用于 auth 模块内部的简单单跳转发，不保留原始请求头。
 func (h *LoginHandler) forward(ctx context.Context, targetConn core.IConnection, action string, data any) {
 	if targetConn == nil {
 		return
@@ -213,6 +225,7 @@ func (h *LoginHandler) forward(ctx context.Context, targetConn core.IConnection,
 	_ = targetConn.SendWithHeader(hdr, payload, codec)
 }
 
+// forwardAuthorityRequest 使用当前节点作为 SourceID 向 authority 发起请求。
 func (h *LoginHandler) forwardAuthorityRequest(ctx context.Context, authority authoritySelection, reqHdr core.IHeader, action string, data any) bool {
 	target := authority.targetNodeID
 	if target == 0 {
@@ -225,6 +238,7 @@ func (h *LoginHandler) forwardAuthorityRequest(ctx context.Context, authority au
 	return h.sendAuthCmdToTarget(ctx, authority.conn, reqHdr, action, data, source, target, false)
 }
 
+// forwardInheritedAuthorityRequest 在转发 admin/assist 请求时保留原始 SourceID。
 func (h *LoginHandler) forwardInheritedAuthorityRequest(ctx context.Context, authority authoritySelection, reqHdr core.IHeader, action string, data any) bool {
 	target := authority.targetNodeID
 	if target == 0 {
@@ -243,6 +257,7 @@ func (h *LoginHandler) forwardInheritedAuthorityRequest(ctx context.Context, aut
 	return h.sendAuthCmdToTarget(ctx, authority.conn, reqHdr, action, data, source, target, true)
 }
 
+// sendAuthCmdToTarget 构造带 SourceID/TargetID 的 auth Cmd 帧并发送到下一跳。
 func (h *LoginHandler) sendAuthCmdToTarget(ctx context.Context, targetConn core.IConnection, reqHdr core.IHeader, action string, data any, sourceNodeID uint32, targetNodeID uint32, forwarded bool) bool {
 	if targetConn == nil || sourceNodeID == 0 || targetNodeID == 0 {
 		return false
@@ -279,6 +294,7 @@ func (h *LoginHandler) sendAuthCmdToTarget(ctx context.Context, targetConn core.
 }
 
 // route index helpers: allow mapping child nodeIDs to the connection carrying them.
+// addRouteIndex 在公钥不冲突时把 descendant node 映射到当前连接。
 func (h *LoginHandler) addRouteIndex(ctx context.Context, nodeID uint32, conn core.IConnection) {
 	if nodeID == 0 || conn == nil {
 		return
@@ -293,6 +309,7 @@ func (h *LoginHandler) addRouteIndex(ctx context.Context, nodeID uint32, conn co
 	}
 }
 
+// lookupTrustedNodePub 先看持久可信缓存，再退化到连接元数据中的 node_pubkey。
 func (h *LoginHandler) lookupTrustedNodePub(nodeID uint32, conn core.IConnection) *ecdsa.PublicKey {
 	if nodeID == 0 {
 		return nil
@@ -354,6 +371,7 @@ func (h *LoginHandler) canAddRoute(ctx context.Context, nodeID uint32, newPub []
 	return false
 }
 
+// metaPubKey 读取连接上缓存的公钥字节，供路由冲突判断使用。
 func metaPubKey(conn core.IConnection) []byte {
 	if conn == nil {
 		return nil
@@ -366,6 +384,7 @@ func metaPubKey(conn core.IConnection) []byte {
 	return nil
 }
 
+// removeRouteIndex 在节点离线或 revoke 后撤销其树路由索引。
 func (h *LoginHandler) removeRouteIndex(ctx context.Context, nodeID uint32) {
 	if nodeID == 0 {
 		return

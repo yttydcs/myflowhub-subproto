@@ -1,6 +1,6 @@
 package varstore
 
-// Context: This file belongs to the SubProto implementation layer around helpers.
+// 本文件承载 SubProto 中 `varstore` 模块里与 `helpers` 相关的逻辑。
 
 import (
 	"context"

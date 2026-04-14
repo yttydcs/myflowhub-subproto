@@ -1,6 +1,6 @@
 package management
 
-// Context: This file belongs to the SubProto implementation layer around management_response_path_test.
+// 本文件覆盖 SubProto 中 `management` 模块里与 `management_response_path` 相关的行为。
 
 import (
 	"context"

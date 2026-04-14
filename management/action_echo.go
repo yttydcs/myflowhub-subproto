@@ -1,6 +1,6 @@
 package management
 
-// Context: This file belongs to the SubProto implementation layer around action_echo.
+// 本文件承载 SubProto 中 `management` 模块里与 `action_echo` 相关的逻辑。
 
 import (
 	"context"

@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around authority_policy_test.
+// 本文件覆盖 SubProto 中 `auth` 模块里与 `authority_policy` 相关的行为。
 
 import (
 	"context"

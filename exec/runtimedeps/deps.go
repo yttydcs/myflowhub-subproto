@@ -1,6 +1,6 @@
 package runtimedeps
 
-// Context: This file belongs to the SubProto implementation layer around deps.
+// 本文件承载 SubProto 中 `exec` 模块里与 `deps` 相关的逻辑。
 
 import (
 	core "github.com/yttydcs/myflowhub-core"

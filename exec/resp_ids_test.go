@@ -1,6 +1,6 @@
 package exec
 
-// Context: This file belongs to the SubProto implementation layer around resp_ids_test.
+// 本文件覆盖 SubProto 中 `exec` 模块里与 `resp_ids` 相关的行为。
 
 import (
 	"context"

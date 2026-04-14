@@ -1,6 +1,6 @@
 package broker
 
-// Context: This file belongs to the SubProto implementation layer around broker_test.
+// 本文件覆盖 SubProto 中 `broker` 模块里与 `broker` 相关的行为。
 
 import "testing"
 

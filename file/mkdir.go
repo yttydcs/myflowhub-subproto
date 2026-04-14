@@ -1,6 +1,6 @@
 package file
 
-// Context: This file belongs to the SubProto implementation layer around mkdir.
+// 本文件承载 SubProto 中 `file` 模块里与 `mkdir` 相关的逻辑。
 
 import (
 	"os"
@@ -8,6 +8,7 @@ import (
 	"strings"
 )
 
+// mkdirLocalDir 在真正落盘前统一完成输入清洗、路径越界防护和幂等/冲突判定。
 func mkdirLocalDir(baseDir, dir, name string) (cleanDir string, cleanName string, code int, msg string) {
 	cleanDir, err := sanitizeDir(dir)
 	if err != nil {

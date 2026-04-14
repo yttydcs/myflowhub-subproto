@@ -1,6 +1,6 @@
 package auth
 
-// Context: This file belongs to the SubProto implementation layer around auth.
+// 本文件承载 SubProto 中 `auth` 模块里与 `auth` 相关的逻辑。
 
 import (
 	"context"
@@ -63,10 +63,12 @@ type pendingInfo struct {
 	traceID uint32
 }
 
+// NewLoginHandler 创建 auth handler，并使用默认配置。
 func NewLoginHandler(log *slog.Logger) *LoginHandler {
 	return NewLoginHandlerWithConfig(nil, log)
 }
 
+// NewLoginHandlerWithConfig 装载持久状态、密钥、权限配置和 authority 策略。
 func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler {
 	if log == nil {
 		log = slog.Default()
@@ -135,6 +137,7 @@ func NewLoginHandlerWithConfig(cfg core.IConfig, log *slog.Logger) *LoginHandler
 	return h
 }
 
+// addTrustedNode 维护 nodeID 到公钥的可信索引，供后续路由与验签复用。
 func (h *LoginHandler) addTrustedNode(nodeID uint32, pubB64 string) {
 	if nodeID == 0 || strings.TrimSpace(pubB64) == "" {
 		return
@@ -166,8 +169,10 @@ func (h *LoginHandler) addTrustedNode(nodeID uint32, pubB64 string) {
 	h.persistState()
 }
 
+// SubProto 返回 auth 子协议号。
 func (h *LoginHandler) SubProto() uint8 { return 2 }
 
+// Init 在 dispatcher 注册期检查配置错误并挂载动作表。
 func (h *LoginHandler) Init() bool {
 	if h.initErr != nil {
 		if h.log != nil {
@@ -179,6 +184,7 @@ func (h *LoginHandler) Init() bool {
 	return true
 }
 
+// BindServer 仅在半中心 authority 模式下启动本地 policy 广播循环。
 func (h *LoginHandler) BindServer(srv core.IServer) {
 	if h == nil || srv == nil || !h.isSemiCentralMode() || h.parentConfigured(srv.Config()) {
 		return
@@ -198,6 +204,8 @@ func (h *LoginHandler) BindServer(srv core.IServer) {
 
 // AllowSourceMismatch 登录阶段允许 SourceID 与连接元数据不一致（尚未绑定 nodeID）。
 func (h *LoginHandler) AllowSourceMismatch() bool { return true }
+
+// OnReceive 负责 auth 帧解析、TargetID 转发判定以及登录阶段的 source 校验。
 func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr core.IHeader, payload []byte) {
 	var msg message
 	if err := json.Unmarshal(payload, &msg); err != nil {
@@ -224,6 +232,7 @@ func (h *LoginHandler) OnReceive(ctx context.Context, conn core.IConnection, hdr
 	entry.Handle(ctx, conn, hdr, msg.Data)
 }
 
+// initActions 汇总 auth 模块分散在多个文件里的动作注册函数。
 func (h *LoginHandler) initActions() {
 	h.ResetActions()
 	for _, act := range registerRegisterActions(h) {

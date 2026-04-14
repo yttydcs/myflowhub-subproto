@@ -1,6 +1,6 @@
 package varstore
 
-// Context: This file belongs to the SubProto implementation layer around trigger_event_test.
+// 本文件覆盖 SubProto 中 `varstore` 模块里与 `trigger_event` 相关的行为。
 
 import (
 	"context"

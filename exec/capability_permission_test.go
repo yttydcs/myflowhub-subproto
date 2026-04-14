@@ -1,6 +1,6 @@
 package exec
 
-// Context: This file belongs to the SubProto implementation layer around capability_permission_test.
+// 本文件覆盖 SubProto 中 `exec` 模块里与 `capability_permission` 相关的行为。
 
 import (
 	"context"
