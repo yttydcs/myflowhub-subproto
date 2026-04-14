@@ -1,11 +1,14 @@
 package auth
 
+// 本文件覆盖 SubProto 中 `auth` 模块里与 `display_name` 相关的行为。
+
 import (
 	"context"
 	"encoding/json"
 	"testing"
 
 	core "github.com/yttydcs/myflowhub-core"
+	coreconfig "github.com/yttydcs/myflowhub-core/config"
 	"github.com/yttydcs/myflowhub-core/connmgr"
 )
 
@@ -148,11 +151,15 @@ func TestHandleLogin_DirectChildDisplayNameBootstrap(t *testing.T) {
 
 	h := &LoginHandler{
 		whitelist: map[string]bindingRecord{
-			"dev-login": {NodeID: 6, PubKey: cloneSlice(pubRaw)},
+			"dev-login": {NodeID: 6, Role: "superadmin", Perms: []string{"*"}, PubKey: cloneSlice(pubRaw)},
 		},
 		pendingConn:    make(map[string]pendingInfo),
 		disablePersist: true,
 	}
+	h.loadAuthConfig(coreconfig.NewMap(map[string]string{
+		coreconfig.KeyAuthNodeRoles: "6:superadmin",
+		coreconfig.KeyAuthRolePerms: "superadmin:*",
+	}))
 
 	req := loginData{
 		DeviceID:    "dev-login",
@@ -182,6 +189,12 @@ func TestHandleLogin_DirectChildDisplayNameBootstrap(t *testing.T) {
 	if resp.DisplayName != "Edge Login" {
 		t.Fatalf("expected display_name in login resp, got %+v", resp)
 	}
+	if resp.Role != "superadmin" {
+		t.Fatalf("expected role in login resp, got %+v", resp)
+	}
+	if len(resp.Perms) != 1 || resp.Perms[0] != "*" {
+		t.Fatalf("expected perms in login resp, got %+v", resp)
+	}
 }
 
 func TestHandleLogin_AssistPathCachesDisplayNameForDirectChild(t *testing.T) {
@@ -196,11 +209,15 @@ func TestHandleLogin_AssistPathCachesDisplayNameForDirectChild(t *testing.T) {
 
 	h := &LoginHandler{
 		whitelist: map[string]bindingRecord{
-			"dev-login-assist": {NodeID: 6, PubKey: cloneSlice(pubRaw)},
+			"dev-login-assist": {NodeID: 6, Role: "superadmin", Perms: []string{"*"}, PubKey: cloneSlice(pubRaw)},
 		},
 		pendingConn:    make(map[string]pendingInfo),
 		disablePersist: true,
 	}
+	h.loadAuthConfig(coreconfig.NewMap(map[string]string{
+		coreconfig.KeyAuthNodeRoles: "6:superadmin",
+		coreconfig.KeyAuthRolePerms: "superadmin:*",
+	}))
 
 	req := loginData{
 		DeviceID:    "dev-login-assist",
@@ -229,6 +246,12 @@ func TestHandleLogin_AssistPathCachesDisplayNameForDirectChild(t *testing.T) {
 	}
 	if resp.DisplayName != "Edge Assist" {
 		t.Fatalf("expected display_name in assist login resp, got %+v", resp)
+	}
+	if resp.Role != "superadmin" {
+		t.Fatalf("expected role in assist login resp, got %+v", resp)
+	}
+	if len(resp.Perms) != 1 || resp.Perms[0] != "*" {
+		t.Fatalf("expected perms in assist login resp, got %+v", resp)
 	}
 }
 

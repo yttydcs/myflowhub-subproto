@@ -1,5 +1,7 @@
 package auth
 
+// 本文件承载 SubProto 中 `auth` 模块里与 `actions_login` 相关的逻辑。
+
 import (
 	"context"
 	"encoding/base64"
@@ -10,6 +12,7 @@ import (
 	"github.com/yttydcs/myflowhub-core/subproto/kit"
 )
 
+// handleLoginResp 把上游 authority 的登录结果回写到原始连接，并同步本地绑定缓存。
 func (h *LoginHandler) handleLoginResp(ctx context.Context, data json.RawMessage) {
 	var resp respData
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -50,6 +53,7 @@ func (h *LoginHandler) handleLoginResp(ctx context.Context, data json.RawMessage
 	}
 }
 
+// handleLogin 统一处理 direct/assist 登录，请求会在本地验签与 authority 转发之间择一路径。
 func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage, assisted bool) {
 	send := h.sendDirectResp
 	if assisted {
@@ -99,6 +103,7 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 		if isSameConnectionNode(conn, rec.NodeID) {
 			applyDisplayNameMeta(conn, req.DisplayName)
 		}
+		role, perms, _ := h.lookupByNode(rec.NodeID)
 		h.addRouteIndex(ctx, rec.NodeID, conn)
 		h.sendAssistResp(ctx, conn, hdr, actionAssistLoginResp, respData{
 			Code:        1,
@@ -106,6 +111,8 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 			DeviceID:    req.DeviceID,
 			NodeID:      rec.NodeID,
 			HubID:       localNodeID(ctx),
+			Role:        role,
+			Perms:       perms,
 			PubKey:      base64.StdEncoding.EncodeToString(rec.PubKey),
 			NodePub:     base64.StdEncoding.EncodeToString(rec.PubKey),
 			DisplayName: req.DisplayName,
@@ -140,12 +147,15 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 			h.saveBinding(ctx, conn, req.DeviceID, rec.NodeID, rec.PubKey)
 			h.applyHubID(ctx, conn, localNodeID(ctx))
 			applyDisplayNameMeta(conn, req.DisplayName)
+			role, perms, _ := h.lookupByNode(rec.NodeID)
 			send(ctx, conn, hdr, actionLoginResp, respData{
 				Code:        1,
 				Msg:         "ok",
 				DeviceID:    req.DeviceID,
 				NodeID:      rec.NodeID,
 				HubID:       localNodeID(ctx),
+				Role:        role,
+				Perms:       perms,
 				PubKey:      base64.StdEncoding.EncodeToString(rec.PubKey),
 				NodePub:     base64.StdEncoding.EncodeToString(rec.PubKey),
 				DisplayName: req.DisplayName,
@@ -173,6 +183,7 @@ func (h *LoginHandler) handleLogin(ctx context.Context, conn core.IConnection, h
 	send(ctx, conn, hdr, actionLoginResp, respData{Code: 4001, Msg: "invalid signature"})
 }
 
+// registerLoginActions 把 direct login 与 assist login 收敛到同一套处理逻辑。
 func registerLoginActions(h *LoginHandler) []core.SubProcessAction {
 	return []core.SubProcessAction{
 		kit.NewAction(actionLogin, func(ctx context.Context, conn core.IConnection, hdr core.IHeader, data json.RawMessage) {
